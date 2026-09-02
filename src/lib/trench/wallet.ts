@@ -5,8 +5,29 @@ const KEY = "trencher-wallet-v1";
 const SIGN_KEY = "trencher-sign-one";
 const HOT_KEY = "trencher-hot-v1";
 const HOT_ARM = "trencher-hot-auto";
+const LIVE_MINTS = "trencher-live-mints";
 
 export const LIVE_CAP_SOL = 0.02;
+
+export function markLiveMint(mint: string) {
+  if (!mint) return;
+  try {
+    const cur = JSON.parse(localStorage.getItem(LIVE_MINTS) || "[]") as string[];
+    if (cur.includes(mint)) return;
+    localStorage.setItem(LIVE_MINTS, JSON.stringify([...cur, mint].slice(-80)));
+  } catch {
+    /* ignore */
+  }
+}
+
+export function isLiveMint(mint: string): boolean {
+  if (!mint) return false;
+  try {
+    return (JSON.parse(localStorage.getItem(LIVE_MINTS) || "[]") as string[]).includes(mint);
+  } catch {
+    return false;
+  }
+}
 
 type PhantomProvider = {
   isPhantom?: boolean;
@@ -246,6 +267,7 @@ export async function signOneBuy(mint: string, symbol: string): Promise<{ ok: bo
     const sent = await p.signAndSendTransaction(tx);
     spendSignOne();
     const sig = sent.signature;
+    markLiveMint(mint);
     return {
       ok: true,
       text: `SIGNED · 0.02 SOL buy $${symbol} · ${sig.slice(0, 8)}… · sign-one spent. https://solscan.io/tx/${sig}`,
@@ -280,6 +302,7 @@ export async function hotBuy(mint: string, symbol: string): Promise<{ ok: boolea
     if (!sent.ok || !sent.sig) {
       return { ok: false, text: `HOT send failed: ${sent.error}` };
     }
+    markLiveMint(mint);
     return {
       ok: true,
       text: `HOT · 0.02 SOL $${symbol} · ${sent.sig.slice(0, 8)}… https://solscan.io/tx/${sent.sig}`,

@@ -151,9 +151,54 @@ export type Rival = {
   lessons: Lesson[];
   feesPaid: number;
   killed: number;
+  callsign: string;
 };
 
 export type LaneId = "vet" | "hatch" | "cub";
+
+const CALL_STEMS = [
+  "NYX",
+  "ORION",
+  "VEX",
+  "KAEL",
+  "ZED",
+  "RYN",
+  "NOVA",
+  "HEX",
+  "KAI",
+  "ION",
+  "LYRA",
+  "APEX",
+  "RAVEN",
+  "ECHO",
+  "AXIOM",
+  "SABLE",
+  "WRAITH",
+  "CRUX",
+  "HALO",
+  "NEX",
+  "TOR",
+  "VELA",
+  "QUILL",
+  "VOID",
+  "OMEN",
+  "VYRE",
+  "JET",
+  "RHO",
+  "KITE",
+  "SOLA",
+] as const;
+
+export function mintCallsign(taken: string[] = []): string {
+  const used = new Set(taken.filter(Boolean).map((n) => n.toUpperCase()));
+  for (let i = 0; i < 80; i++) {
+    const stem = CALL_STEMS[Math.floor(Math.random() * CALL_STEMS.length)];
+    const n = 1 + Math.floor(Math.random() * 99);
+    const name = `${stem}-${n}`;
+    if (!used.has(name)) return name;
+  }
+  return `UNIT-${Date.now().toString(36).slice(-4).toUpperCase()}`;
+}
 
 export type BookFile = {
   v: 1;

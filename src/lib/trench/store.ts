@@ -19,6 +19,7 @@ import {
   paperFee,
   paperSlip,
   pnlPct,
+  pickHotLane,
   positionValue,
   reviewLosersLocal,
   scoreSetup,
@@ -29,7 +30,7 @@ import {
 } from "./logic";
 import { ntfyHeartbeat, pingNtfy } from "./ntfy";
 import { amHunter, deskPin, syncCloud } from "./cloud";
-import { LIVE_CAP_SOL, hotAutoArmed, hotBuy, hotSell, refreshHot, shadowQuote, signOneBuy, signOneState } from "./wallet";
+import { LIVE_CAP_SOL, hotAutoArmed, hotBuy, hotSell, isLiveMint, refreshHot, shadowQuote, signOneBuy, signOneState } from "./wallet";
 import { canonHasBlood, canonToPlaybook } from "./canon";
 import { useSpirit } from "./spirit";
 import {
@@ -62,6 +63,7 @@ import {
   type Rival,
   type LaneId,
   type SellReason,
+  mintCallsign,
 } from "./types";
 
 type TrenchState = {
@@ -106,6 +108,7 @@ type TrenchState = {
   hotSol: number | null;
   lastHotLine: string | null;
   atHome: boolean;
+  callsign: string;
   goHome: () => void;
   leaveHome: () => void;
   spawnRival: () => void;
@@ -200,6 +203,7 @@ function initial(): Omit<
     hotSol: null,
     lastHotLine: null,
     atHome: false,
+    callsign: "",
   };
 }
 
@@ -229,7 +233,7 @@ function hatchOn(r: Rival | null | undefined): boolean {
   return !!r && (r.status === "alive" || r.status === "survived");
 }
 
-function blankHatch(burns: string[]): Rival {
+function blankHatch(burns: string[], taken: string[] = []): Rival {
   return {
     status: "alive",
     cash: STARTING_CASH,
@@ -243,6 +247,7 @@ function blankHatch(burns: string[]): Rival {
     lessons: [],
     feesPaid: 0,
     killed: 0,
+    callsign: mintCallsign(taken),
   };
 }
 
@@ -291,6 +296,154 @@ export const useTrench = create<TrenchState>()(
         });
       }
 
+      function vetTag() {
+        return get().callsign || "body";
+      }
+      function hatchTag() {
+        return get().rival?.callsign || "body";
+      }
+      function cubTag() {
+        return get().extra?.callsign || "body";
+      }
+      function takenSigns() {
+        const s = get();
+        return [s.callsign, s.rival?.callsign, s.extra?.callsign].filter(Boolean) as string[];
+      }
+      function signOf(id: LaneId) {
+        if (id === "vet") return vetTag();
+        if (id === "hatch") return hatchTag();
+        return cubTag();
+      }
+
+      function captain(): LaneId | null {
+        const s = get();
+        return pickHotLane(Date.now(), [
+          {
+            id: "vet",
+            hunting: !s.vetDead && !s.rentPaid && (s.status === "alive" || s.status === "survived"),
+            closed: s.closed,
+            startedAt: s.startedAt,
+          },
+          {
+            id: "hatch",
+            hunting: hatchOn(s.rival) && !!s.rival && !s.rival.rentPaid,
+            closed: s.rival?.closed ?? [],
+            startedAt: s.rival?.startedAt ?? null,
+          },
+          {
+            id: "cub",
+            hunting: liveBody(s.extra) && !!s.extra && !s.extra.rentPaid,
+            closed: s.extra?.closed ?? [],
+            startedAt: s.extra?.startedAt ?? null,
+          },
+        ]);
+      }
+
+      let lastCap: LaneId | null = null;
+      function announceCaptain() {
+        const id = captain();
+        if (id === lastCap) return;
+        lastCap = id;
+        if (!id) return;
+        const s = get();
+        const closed =
+          id === "vet" ? s.closed : id === "hatch" ? (s.rival?.closed ?? []) : (s.extra?.closed ?? []);
+        const started =
+          id === "vet" ? s.startedAt : id === "hatch" ? s.rival?.startedAt : s.extra?.startedAt;
+        const n = closed.length;
+        const win = n ? Math.round((closed.filter((t) => t.pnlUsd > 0).length / n) * 100) : 0;
+        const age = started ? ((Date.now() - started) / 86_400_000).toFixed(1) : "0";
+        log(
+          "TILL",
+          "sys",
+          `hot wallet follows ${signOf(id)}. win ${win}% · ${n} clips · ${age}d in the cell.`,
+        );
+      }
+
+      function markLaneLive(lane: LaneId, mint: string) {
+        if (lane === "vet") {
+          set((s) => ({
+            positions: s.positions.map((p) => (p.mint === mint ? { ...p, live: true } : p)),
+          }));
+          return;
+        }
+        if (lane === "hatch") {
+          set((s) =>
+            s.rival
+              ? {
+                  rival: {
+                    ...s.rival,
+                    positions: s.rival.positions.map((p) =>
+                      p.mint === mint ? { ...p, live: true } : p,
+                    ),
+                  },
+                }
+              : {},
+          );
+          return;
+        }
+        set((s) =>
+          s.extra
+            ? {
+                extra: {
+                  ...s.extra,
+                  positions: s.extra.positions.map((p) =>
+                    p.mint === mint ? { ...p, live: true } : p,
+                  ),
+                },
+              }
+            : {},
+        );
+      }
+
+      function fireLive(lane: LaneId, mint: string, symbol: string, score: number) {
+        if (!hotAutoArmed() && signOneState() !== "armed") return;
+        if (captain() !== lane) return;
+        const spiritFloor = Math.max(
+          SCORE_FLOOR,
+          useSpirit.getState().canon?.scoreFloor ?? SCORE_FLOOR,
+        );
+        if (score < spiritFloor) {
+          log(
+            "TILL",
+            "sys",
+            `SPIRIT veto live $${symbol} score ${score} vs canon floor ${spiritFloor}. paper only. ${signOf(lane)} holds the wallet.`,
+            { mint, symbol },
+          );
+          return;
+        }
+        if (hotAutoArmed()) {
+          void hotBuy(mint, symbol).then((r) => {
+            log("TILL", r.ok ? "till" : "sys", r.text, { mint, symbol });
+            set({ lastHotLine: r.text });
+            if (r.ok) {
+              pingNtfy("TRENCHER", `HOT 0.02 SOL $${symbol} · ${signOf(lane)}`, true);
+              markLaneLive(lane, mint);
+            }
+          });
+          return;
+        }
+        void signOneBuy(mint, symbol).then((r) => {
+          log("TILL", r.ok ? "till" : "sys", r.text, { mint, symbol });
+          if (r.ok) {
+            pingNtfy("TRENCHER", `SIGNED 0.02 SOL $${symbol} · ${signOf(lane)}`, true);
+            markLaneLive(lane, mint);
+          }
+        });
+      }
+
+      function fireLiveSell(p: { mint: string; symbol: string; live?: boolean }) {
+        if (!hotAutoArmed()) return;
+        if (!(p.live || isLiveMint(p.mint))) return;
+        const mint = p.mint;
+        const symbol = p.symbol;
+        void hotSell(mint, symbol).then((r) => {
+          log("TILL", r.ok ? "till" : "sys", r.text, { mint, symbol });
+          set({ lastHotLine: r.text });
+          if (r.ok) pingNtfy("TRENCHER", `HOT SELL $${symbol}`, true);
+        });
+      }
+
       function hunters() {
         const s = get();
         const out: { id: LaneId; eq: number; cash: number }[] = [];
@@ -315,7 +468,7 @@ export const useTrench = create<TrenchState>()(
         return out;
       }
 
-      function spiritBody(floorShift = 0): Rival {
+      function spiritBody(floorShift = 0, taken: string[] = []): Rival {
         const spirit = useSpirit.getState().canon;
         const book = canonHasBlood(spirit) ? canonToPlaybook(spirit) : blankPlaybook();
         const floor = Math.max(
@@ -335,6 +488,7 @@ export const useTrench = create<TrenchState>()(
           lessons: (spirit.lessons ?? []).slice(0, 12),
           feesPaid: 0,
           killed: 0,
+          callsign: mintCallsign(taken),
         };
       }
 
@@ -356,6 +510,7 @@ export const useTrench = create<TrenchState>()(
             lessons: Lesson[];
             feesPaid: number;
             lastBuyAt: number;
+            callsign: string;
           };
           const list: Snap[] = [];
           const take = (id: LaneId, addPot = false) => {
@@ -367,10 +522,12 @@ export const useTrench = create<TrenchState>()(
             let lessons = s.lessons;
             let feesPaid = s.feesPaid ?? 0;
             let lastBuyAt = s.lastBuyAt;
+            let callsign = s.callsign;
             if (id === "vet") {
               cash = s.cash;
               positions = s.positions;
               closed = s.closed;
+              callsign = s.callsign;
             } else if (id === "hatch" && s.rival) {
               cash = s.rival.cash;
               positions = s.rival.positions;
@@ -379,6 +536,7 @@ export const useTrench = create<TrenchState>()(
               lessons = s.rival.lessons;
               feesPaid = s.rival.feesPaid ?? 0;
               lastBuyAt = s.rival.lastBuyAt;
+              callsign = s.rival.callsign;
             } else if (id === "cub" && s.extra) {
               cash = s.extra.cash;
               positions = s.extra.positions;
@@ -387,6 +545,7 @@ export const useTrench = create<TrenchState>()(
               lessons = s.extra.lessons;
               feesPaid = s.extra.feesPaid ?? 0;
               lastBuyAt = s.extra.lastBuyAt;
+              callsign = s.extra.callsign;
             } else return;
             if (addPot) cash = Math.round((cash + pot) * 100) / 100;
             const eq = equityOf(cash, positions);
@@ -400,10 +559,11 @@ export const useTrench = create<TrenchState>()(
               lessons,
               feesPaid,
               lastBuyAt,
+              callsign: callsign || mintCallsign(list.map((x) => x.callsign)),
             });
           };
-          for (const id of resters()) take(id, false);
           if (huntWinner) take(huntWinner, true);
+          for (const id of resters()) take(id, false);
           const toRival = (b: Snap): Rival => ({
             status: "alive",
             cash: b.cash,
@@ -417,12 +577,17 @@ export const useTrench = create<TrenchState>()(
             lessons: b.lessons,
             feesPaid: b.feesPaid,
             killed: 0,
+            callsign: b.callsign,
           });
           const champ = list[0];
           const hatchSnap = list[1];
           const cubSnap = list[2];
+          const kept = list.map((x) => x.callsign);
+          const hatchBody = hatchSnap ? toRival(hatchSnap) : spiritBody(-10, kept);
+          const cubBody = cubSnap ? toRival(cubSnap) : spiritBody(-22, [...kept, hatchBody.callsign]);
           const vetCash = champ?.cash ?? STARTING_CASH;
           const vetPlay = champ?.playbook ?? s.playbook;
+          const vetSign = champ?.callsign || mintCallsign([hatchBody.callsign, cubBody.callsign]);
           set({
             status: "alive",
             vetDead: false,
@@ -435,8 +600,9 @@ export const useTrench = create<TrenchState>()(
             lastBuyAt: champ ? champ.lastBuyAt : 0,
             rentPaid: false,
             diedAt: null,
-            rival: hatchSnap ? toRival(hatchSnap) : spiritBody(-10),
-            extra: cubSnap ? toRival(cubSnap) : spiritBody(-22),
+            callsign: vetSign,
+            rival: hatchBody,
+            extra: cubBody,
             focus: "vet",
             housePot: 0,
             roundStartedAt: now,
@@ -447,12 +613,10 @@ export const useTrench = create<TrenchState>()(
             },
           });
           const names = [
-            champ ? `vet ${vetCash.toFixed(2)}` : null,
-            hatchSnap ? `hatch ${hatchSnap.cash.toFixed(2)}` : "hatch $50 new",
-            cubSnap ? `cub ${cubSnap.cash.toFixed(2)}` : "cub $50 new",
-          ]
-            .filter(Boolean)
-            .join(" · ");
+            champ ? `${vetSign} ${vetCash.toFixed(2)}` : `${vetSign} $50 new`,
+            `${hatchBody.callsign} ${hatchSnap ? hatchSnap.cash.toFixed(2) : "50 new"}`,
+            `${cubBody.callsign} ${cubSnap ? cubSnap.cash.toFixed(2) : "50 new"}`,
+          ].join(" · ");
           log(
             "META",
             "sys",
@@ -476,8 +640,8 @@ export const useTrench = create<TrenchState>()(
             "META",
             "sys",
             bye.length
-              ? `pit over. ${live[0].id} won the remaining fight. ${bye.join("+")} already had a bye.`
-              : `last body standing: ${live[0].id}. round over.`,
+              ? `pit over. ${signOf(live[0].id)} won the remaining fight. ${bye.map(signOf).join("+")} already had a bye.`
+              : `last body standing: ${signOf(live[0].id)}. round over.`,
           );
           nextRound(live[0].id);
           return;
@@ -489,6 +653,9 @@ export const useTrench = create<TrenchState>()(
             return;
           }
           const now2 = Date.now();
+          const a = mintCallsign();
+          const b = spiritBody(-10, [a]);
+          const c = spiritBody(-22, [a, b.callsign]);
           set({
             status: "alive",
             vetDead: false,
@@ -498,16 +665,17 @@ export const useTrench = create<TrenchState>()(
             rentPaid: false,
             lastBuyAt: 0,
             diedAt: null,
+            callsign: a,
             playbook: canonHasBlood(useSpirit.getState().canon)
               ? canonToPlaybook(useSpirit.getState().canon)
               : s.playbook,
-            rival: spiritBody(-10),
-            extra: spiritBody(-22),
+            rival: b,
+            extra: c,
             focus: "vet",
             roundStartedAt: now2,
             round: (s.round ?? 1) + 1,
           });
-          log("META", "sys", "cell empty. three new $50. pot stays for the next champion.");
+          log("META", "sys", `cell empty. ${a} · ${b.callsign} · ${c.callsign}. three new $50. pot stays for the next champion.`);
           return;
         }
         const start = s.roundStartedAt ?? s.startedAt;
@@ -517,7 +685,7 @@ export const useTrench = create<TrenchState>()(
           log(
             "TILL",
             "till",
-            `168h. hunters ${live.map((x) => `${x.id} ${x.eq.toFixed(2)}`).join(" · ")}. ${champ.id} takes the pit.`,
+            `168h. hunters ${live.map((x) => `${signOf(x.id)} ${x.eq.toFixed(2)}`).join(" · ")}. ${signOf(champ.id)} takes the pit.`,
           );
           for (const x of live.slice(1)) {
             if (x.id === "vet") die("week over. not the pile.", true);
@@ -551,19 +719,19 @@ export const useTrench = create<TrenchState>()(
         if (s.status !== "alive" && s.status !== "survived") return;
         const hatch = hatchOn(s.rival);
         const cub = liveBody(s.extra);
-        log("TILL", "sys", `veteran · ${reason}`);
+        log("TILL", "sys", `${vetTag()} · ${reason}`);
         log(
           "META",
           "sys",
           hatch || cub
-            ? "veteran deleted. other bodies still in the cell. the spirit kept the peak, not this floor."
-            : "clone deleted. the spirit kept the burns. cash is not. save it — this window is not a vault.",
+            ? `${vetTag()} deleted. other bodies still in the cell. the spirit kept the peak, not this floor.`
+            : `${vetTag()} deleted. the spirit kept the burns. cash is not. save it — this window is not a vault.`,
         );
         useSpirit.getState().absorb(get().snapshotBook());
         const leftover = equityOf(s.cash, s.positions);
         if (leftover > 0) {
           set({ housePot: (get().housePot ?? 0) + leftover });
-          log("TILL", "till", `veteran leftover ${leftover.toFixed(2)} → house pot.`);
+          log("TILL", "till", `${vetTag()} leftover ${leftover.toFixed(2)} → house pot.`);
         }
         const spirit = useSpirit.getState().canon;
         const h = s.house ?? blankHouse();
@@ -593,18 +761,19 @@ export const useTrench = create<TrenchState>()(
         pingNtfy(
           "TRENCHER",
           hatch || cub
-            ? `veteran deleted. ${hatch ? "hatch" : ""}${hatch && cub ? " + " : ""}${cub ? "cub" : ""} still up.`
-            : "veteran deleted. cell is empty.",
+            ? `${vetTag()} deleted. ${hatch ? hatchTag() : ""}${hatch && cub ? " + " : ""}${cub ? cubTag() : ""} still up.`
+            : `${vetTag()} deleted. cell is empty.`,
           true,
         );
         if (!skipCrown) maybeCrown();
+        if (!skipCrown) fillEmptyChairs();
       }
 
       function dieHatch(reason: string, skipCrown = false) {
         const s = get();
         const r = s.rival;
         if (!hatchOn(r) || !r) return;
-        log("TILL", "sys", `hatch · ${reason}`);
+        log("TILL", "sys", `${hatchTag()} · ${reason}`);
         const st = get();
         useSpirit.getState().absorb({
           v: 1,
@@ -624,7 +793,7 @@ export const useTrench = create<TrenchState>()(
         const leftover = equityOf(r.cash, r.positions);
         if (leftover > 0) {
           set({ housePot: (get().housePot ?? 0) + leftover });
-          log("TILL", "till", `hatch leftover ${leftover.toFixed(2)} → house pot.`);
+          log("TILL", "till", `${hatchTag()} leftover ${leftover.toFixed(2)} → house pot.`);
         }
         const next: Rival = {
           ...r,
@@ -642,18 +811,19 @@ export const useTrench = create<TrenchState>()(
         });
         if (!vetLive && !cubLive) {
           log("META", "sys", "both bodies gone. the box is the only grave.");
-          pingNtfy("TRENCHER", "hatch deleted. cell emptying.", true);
+          pingNtfy("TRENCHER", `${hatchTag()} deleted. cell emptying.`, true);
         } else {
-          pingNtfy("TRENCHER", `hatch deleted. vet ${vetLive ? equityOf(s.cash, s.positions).toFixed(2) : "dead"}.`, true);
+          pingNtfy("TRENCHER", `${hatchTag()} deleted. ${vetTag()} ${vetLive ? equityOf(s.cash, s.positions).toFixed(2) : "dead"}.`, true);
         }
         if (!skipCrown) maybeCrown();
+        if (!skipCrown) fillEmptyChairs();
       }
 
       function dieCub(reason: string, skipCrown = false) {
         const s = get();
         const r = s.extra;
         if (!liveBody(r) || !r) return;
-        log("TILL", "sys", `cub · ${reason}`);
+        log("TILL", "sys", `${cubTag()} · ${reason}`);
         useSpirit.getState().absorb({
           v: 1,
           kind: "trencher-book",
@@ -672,7 +842,7 @@ export const useTrench = create<TrenchState>()(
         const leftover = equityOf(r.cash, r.positions);
         if (leftover > 0) {
           set({ housePot: (get().housePot ?? 0) + leftover });
-          log("TILL", "till", `cub leftover ${leftover.toFixed(2)} → house pot.`);
+          log("TILL", "till", `${cubTag()} leftover ${leftover.toFixed(2)} → house pot.`);
         }
         const next: Rival = { ...r, status: "dead", diedAt: Date.now(), cash: 0, positions: [] };
         const vetLive = !s.vetDead && (s.status === "alive" || s.status === "survived");
@@ -682,8 +852,66 @@ export const useTrench = create<TrenchState>()(
           status: vetLive || hatchLive ? (vetLive ? s.status : "alive") : "dead",
           focus: vetLive ? "vet" : hatchLive ? "hatch" : s.focus,
         });
-        pingNtfy("TRENCHER", `cub deleted.`, true);
+        pingNtfy("TRENCHER", `${cubTag()} deleted.`, true);
         if (!skipCrown) maybeCrown();
+        if (!skipCrown) fillEmptyChairs();
+      }
+
+      function fillEmptyChairs() {
+        const s = get();
+        if (s.status === "watch" || s.status === "idle") return;
+        if (hunters().length < 2) return;
+        if (s.vetDead || s.status === "dead") {
+          const b = spiritBody(-10, takenSigns());
+          set({
+            vetDead: false,
+            status: "alive",
+            cash: STARTING_CASH,
+            positions: [],
+            closed: [],
+            rentPaid: false,
+            lastBuyAt: 0,
+            diedAt: null,
+            startedAt: Date.now(),
+            callsign: b.callsign,
+            playbook: b.playbook,
+            lessons: b.lessons,
+            feesPaid: 0,
+            killed: 0,
+            focus: "vet",
+          });
+          log(
+            "META",
+            "sys",
+            `${b.callsign} takes the empty chair. ${STARTING_CASH.toFixed(0)} usd. spirit on the back.`,
+          );
+          log("TILL", "till", `${b.callsign} · staked ${STARTING_CASH.toFixed(0)} usd.`);
+          pingNtfy("TRENCHER", `${b.callsign} seated. empty chair filled.`, true);
+          return;
+        }
+        if (!hatchOn(s.rival)) {
+          const b = spiritBody(-10, takenSigns());
+          set({ rival: b, focus: "hatch" });
+          log(
+            "META",
+            "sys",
+            `${b.callsign} takes the empty chair. ${STARTING_CASH.toFixed(0)} usd. spirit on the back.`,
+          );
+          log("TILL", "till", `${b.callsign} · staked ${STARTING_CASH.toFixed(0)} usd.`);
+          pingNtfy("TRENCHER", `${b.callsign} seated. empty chair filled.`, true);
+          return;
+        }
+        if (!liveBody(s.extra)) {
+          const b = spiritBody(-22, takenSigns());
+          set({ extra: b, focus: "cub" });
+          log(
+            "META",
+            "sys",
+            `${b.callsign} takes the empty chair. ${STARTING_CASH.toFixed(0)} usd. spirit on the back.`,
+          );
+          log("TILL", "till", `${b.callsign} · staked ${STARTING_CASH.toFixed(0)} usd.`);
+          pingNtfy("TRENCHER", `${b.callsign} seated. empty chair filled.`, true);
+        }
       }
 
       function remember(entries: Omit<Lesson, "id">[]) {
@@ -797,6 +1025,7 @@ export const useTrench = create<TrenchState>()(
             focus: "vet",
             startedAt: now,
             cash: STARTING_CASH,
+            callsign: mintCallsign(),
             agents: blankAgents(),
             house: { ...prev, generation: gen },
             playbook: book,
@@ -824,7 +1053,7 @@ export const useTrench = create<TrenchState>()(
             log("WARDEN", "sys", "my no beats every score. wallets that dump us get burned.");
           }
           log("RISK", "sys", "no entry without a written exit. stops only tighten.");
-          log("TILL", "till", `staked ${STARTING_CASH.toFixed(0)} usd. rent is ${RENT_USD}. balance hits zero, this clone is deleted.`);
+          log("TILL", "till", `${get().callsign || "body"} · staked ${STARTING_CASH.toFixed(0)} usd. rent is ${RENT_USD}. balance hits zero, this clone is deleted.`);
         },
 
         clone: () => {
@@ -872,27 +1101,31 @@ export const useTrench = create<TrenchState>()(
               ...spiritBurns,
             ]),
           );
+          if (!vetLive) {
+            fillEmptyChairs();
+            return;
+          }
           if (!hatchLive) {
-            const hatch = blankHatch(burns);
+            const hatch = blankHatch(burns, takenSigns());
             set({ rival: hatch, focus: "hatch" });
             log(
               "META",
               "sys",
-              `hatchling seated. floor ${hatch.playbook.scoreFloor}. ${burns.length} wallets burned. cannot hold the same mint.`,
+              `${hatch.callsign} seated. floor ${hatch.playbook.scoreFloor}. ${burns.length} wallets burned. cannot hold the same mint.`,
             );
-            log("TILL", "till", `hatch · staked ${STARTING_CASH.toFixed(0)} usd. same tape.`);
+            log("TILL", "till", `${hatch.callsign} · staked ${STARTING_CASH.toFixed(0)} usd. same tape.`);
             return;
           }
           if (!cubLive) {
-            const cub = blankHatch(burns);
+            const cub = blankHatch(burns, takenSigns());
             set({ extra: cub, focus: "cub" });
             log(
               "META",
               "sys",
-              `cub seated. floor ${cub.playbook.scoreFloor}. ${burns.length} spirit burns. three bodies. same tape. no shared mints.`,
+              `${cub.callsign} seated. floor ${cub.playbook.scoreFloor}. ${burns.length} spirit burns. three bodies. same tape. no shared mints.`,
             );
-            log("WARDEN", "sys", "cub · looser floor. hatch stays picky. prove it.");
-            log("TILL", "till", `cub · staked ${STARTING_CASH.toFixed(0)} usd.`);
+            log("WARDEN", "sys", `${cub.callsign} · looser floor. ${hatchTag()} stays picky. prove it.`);
+            log("TILL", "till", `${cub.callsign} · staked ${STARTING_CASH.toFixed(0)} usd.`);
             return;
           }
           log("META", "sys", "cell is full. three bodies. cull if you want a chair.");
@@ -908,60 +1141,69 @@ export const useTrench = create<TrenchState>()(
           if (hatchLive && s.rival && !s.rival.rentPaid) live.push({ id: "hatch", eq: equityOf(s.rival.cash, s.rival.positions) });
           if (cubLive && s.extra && !s.extra.rentPaid) live.push({ id: "cub", eq: equityOf(s.extra.cash, s.extra.positions) });
           if (live.length < 2) {
-            log("META", "sys", "need two bodies to cull.");
+            log("META", "sys", "need two bodies still hunting to cull.");
             return;
           }
+          const focused = live.find((x) => x.id === s.focus);
           live.sort((a, b) => a.eq - b.eq);
-          const loser = live[0];
-          const names = live.map((x) => `${x.id} ${x.eq.toFixed(2)}`).join(" · ");
-          log("TILL", "till", `sunday. ${names}. ${loser.id} dies.`);
-          if (loser.id === "vet") die("sunday cull. lower pnl. deleted.");
-          else if (loser.id === "hatch") dieHatch("sunday cull. lower pnl. deleted.");
-          else dieCub("sunday cull. lower pnl. deleted.");
+          const loser = focused ?? live[0];
+          const names = live.map((x) => `${signOf(x.id)} ${x.eq.toFixed(2)}`).join(" · ");
+          log("TILL", "till", `cull. ${names}. ${signOf(loser.id)} dies.`);
+          if (loser.id === "vet") die("cull. deleted.");
+          else if (loser.id === "hatch") dieHatch("cull. deleted.");
+          else dieCub("cull. deleted.");
         },
 
         payRent: () => {
           const s = get();
           if (s.status === "watch" || s.status === "idle") return;
-          const bank = (n: number) => (s.houseBank ?? 0) + n;
-          if (!s.vetDead && !s.rentPaid && (s.status === "alive" || s.status === "survived") && s.cash >= RENT_USD) {
-            set({
-              cash: s.cash - RENT_USD,
-              rentPaid: true,
-              status: "survived",
-              houseBank: bank(RENT_USD),
-              house: { ...(s.house ?? blankHouse()), escapes: (s.house?.escapes ?? 0) + 1 },
-            });
-            log(
-              "TILL",
-              "till",
-              `vet paid ${RENT_USD} into the house bank. sitting this pit. leftover stack stays. hatch and cub still hunt.`,
-            );
-            pingNtfy("TRENCHER", `vet paid rent. bank $${bank(RENT_USD).toFixed(0)}. pit continues.`, true);
-            maybeCrown();
-            return;
+          const bank = (n: number) => (get().houseBank ?? 0) + n;
+          const order: LaneId[] = s.focus === "hatch" || s.focus === "cub" ? [s.focus, "vet", "hatch", "cub"] : ["vet", "hatch", "cub"];
+          const seen = new Set<LaneId>();
+          for (const id of order) {
+            if (seen.has(id)) continue;
+            seen.add(id);
+            if (id === "vet" && !s.vetDead && !s.rentPaid && (s.status === "alive" || s.status === "survived") && s.cash >= RENT_USD) {
+              set({
+                cash: s.cash - RENT_USD,
+                rentPaid: true,
+                status: "survived",
+                houseBank: bank(RENT_USD),
+                house: { ...(s.house ?? blankHouse()), escapes: (s.house?.escapes ?? 0) + 1 },
+              });
+              log(
+                "TILL",
+                "till",
+                `${vetTag()} paid ${RENT_USD} into the house bank. sitting this pit. leftover stack stays. others still hunt.`,
+              );
+              pingNtfy("TRENCHER", `${vetTag()} paid rent. bank $${bank(RENT_USD).toFixed(0)}. pit continues.`, true);
+              maybeCrown();
+              return;
+            }
+            if (id === "hatch" && hatchOn(s.rival) && s.rival && !s.rival.rentPaid && s.rival.cash >= RENT_USD) {
+              set({
+                rival: { ...s.rival, cash: s.rival.cash - RENT_USD, rentPaid: true },
+                houseBank: bank(RENT_USD),
+                house: { ...(s.house ?? blankHouse()), escapes: (s.house?.escapes ?? 0) + 1 },
+              });
+              log("TILL", "till", `${hatchTag()} paid ${RENT_USD} into the bank. sitting. others hunt.`);
+              pingNtfy("TRENCHER", `${hatchTag()} paid rent.`, true);
+              maybeCrown();
+              return;
+            }
+            if (id === "cub" && liveBody(s.extra) && s.extra && !s.extra.rentPaid && s.extra.cash >= RENT_USD) {
+              set({
+                extra: { ...s.extra, cash: s.extra.cash - RENT_USD, rentPaid: true },
+                houseBank: bank(RENT_USD),
+                house: { ...(s.house ?? blankHouse()), escapes: (s.house?.escapes ?? 0) + 1 },
+              });
+              log("TILL", "till", `${cubTag()} paid ${RENT_USD} into the bank. sitting. others hunt.`);
+              pingNtfy("TRENCHER", `${cubTag()} paid rent.`, true);
+              maybeCrown();
+              return;
+            }
           }
-          if (hatchOn(s.rival) && s.rival && !s.rival.rentPaid && s.rival.cash >= RENT_USD) {
-            set({
-              rival: { ...s.rival, cash: s.rival.cash - RENT_USD, rentPaid: true },
-              houseBank: bank(RENT_USD),
-              house: { ...(s.house ?? blankHouse()), escapes: (s.house?.escapes ?? 0) + 1 },
-            });
-            log("TILL", "till", `hatch paid ${RENT_USD} into the bank. sitting. others hunt.`);
-            maybeCrown();
-            return;
-          }
-          if (liveBody(s.extra) && s.extra && !s.extra.rentPaid && s.extra.cash >= RENT_USD) {
-            set({
-              extra: { ...s.extra, cash: s.extra.cash - RENT_USD, rentPaid: true },
-              houseBank: bank(RENT_USD),
-              house: { ...(s.house ?? blankHouse()), escapes: (s.house?.escapes ?? 0) + 1 },
-            });
-            log("TILL", "till", `cub paid ${RENT_USD} into the bank. sitting. others hunt.`);
-            maybeCrown();
-            return;
-          }
-          log("TILL", "till", "no hunter has 300 cash. flatten a bag first.");
+          log("TILL", "till", "focused body needs 300 cash. flatten a bag first.");
         },
 
         cycle: async () => {
@@ -974,6 +1216,8 @@ export const useTrench = create<TrenchState>()(
           if (!watching && (vetOn || hatchLive || cubLive) && !s0.roundStartedAt) {
             set({ roundStartedAt: s0.startedAt ?? Date.now(), round: s0.round || 1 });
           }
+          if (!watching) fillEmptyChairs();
+          if (!watching) announceCaptain();
           const baseFloor = get().playbook.scoreFloor;
           const hatchTwin = get().rival;
           if (hatchOn(hatchTwin) && hatchTwin && hatchTwin.playbook.scoreFloor >= baseFloor - 2) {
@@ -985,7 +1229,7 @@ export const useTrench = create<TrenchState>()(
                   playbook: { ...hatchTwin.playbook, scoreFloor: floor },
                 },
               });
-              log("SNIPER", "sys", `hatch · floor spread to ${floor}. same burns. not a twin.`);
+              log("SNIPER", "sys", `${hatchTag()} · floor spread to ${floor}. same burns. not a twin.`);
             }
           }
           const cubTwin = get().extra;
@@ -998,7 +1242,7 @@ export const useTrench = create<TrenchState>()(
                   playbook: { ...cubTwin.playbook, scoreFloor: floor },
                 },
               });
-              log("SNIPER", "sys", `cub · floor spread to ${floor}. degen lane. same spirit burns.`);
+              log("SNIPER", "sys", `${cubTag()} · floor spread to ${floor}. degen lane. same spirit burns.`);
             }
           }
           if (
@@ -1196,6 +1440,14 @@ export const useTrench = create<TrenchState>()(
                 `fee $${coin.symbol} ${feeUsd.toFixed(2)} usd. logged separate from the fill.`,
                 { mint: coin.mint, symbol: coin.symbol },
               );
+              const shadow = shadowQuote(fillUsd, st.solUsd);
+              log(
+                "TILL",
+                "sys",
+                `SHADOW · ${vetTag()} would spend ${shadow.sol.toFixed(3)} SOL ($${shadow.usd.toFixed(2)}) on $${coin.symbol} · cap ${LIVE_CAP_SOL}.`,
+                { mint: coin.mint, symbol: coin.symbol },
+              );
+              fireLive("vet", coin.mint, coin.symbol, scored.score);
             }
 
             if (hatchOn(get().rival)) {
@@ -1221,7 +1473,7 @@ export const useTrench = create<TrenchState>()(
                   log(
                     "WARDEN",
                     "kill",
-                    `hatch · veto $${coin.symbol} — scored ${scored.score} vs floor ${r.playbook.scoreFloor}. no beats the sniper.`,
+                    `${hatchTag()} · veto $${coin.symbol} — scored ${scored.score} vs floor ${r.playbook.scoreFloor}. no beats the sniper.`,
                     { mint: coin.mint, symbol: coin.symbol },
                   );
                   set((s) =>
@@ -1232,16 +1484,16 @@ export const useTrench = create<TrenchState>()(
                   continue;
                 }
                 if (r.positions.length >= MAX_POSITIONS) {
-                  log("SNIPER", "scan", `hatch · $${coin.symbol} passed warden. book is full.`);
+                  log("SNIPER", "scan", `${hatchTag()} · $${coin.symbol} passed warden. book is full.`);
                   continue;
                 }
                 if (now - r.lastBuyAt < BUY_COOLDOWN_MS) {
-                  log("SNIPER", "scan", `hatch · $${coin.symbol} passed warden. cooling down.`);
+                  log("SNIPER", "scan", `${hatchTag()} · $${coin.symbol} passed warden. cooling down.`);
                   continue;
                 }
                 const intended = sizeByScore(r.cash, st.solUsd, scored.score);
                 if (intended < 4) {
-                  log("SNIPER", "sys", "hatch · size under 4 usd. waiting on cash.");
+                  log("SNIPER", "sys", `${hatchTag()} · size under 4 usd. waiting on cash.`);
                   continue;
                 }
                 const slipPct = paperSlip(coin.usdMcap);
@@ -1249,7 +1501,7 @@ export const useTrench = create<TrenchState>()(
                 const feeUsd = paperFee(fillUsd);
                 const debit = fillUsd + feeUsd;
                 if (r.cash < debit) {
-                  log("TILL", "till", `hatch · $${coin.symbol} fill plus fee is ${debit.toFixed(2)}. not enough cash.`);
+                  log("TILL", "till", `${hatchTag()} · $${coin.symbol} fill plus fee is ${debit.toFixed(2)}. not enough cash.`);
                   continue;
                 }
                 const mcap = Math.max(coin.usdMcap, 1);
@@ -1274,7 +1526,7 @@ export const useTrench = create<TrenchState>()(
                 log(
                   "RISK",
                   "sys",
-                  `hatch · exit written $${coin.symbol}: stop ${(r.playbook.stopPct * 100).toFixed(0)}% / trail +${(TRAIL_ARM * 100).toFixed(0)}% / −${(TRAIL_GIVE * 100).toFixed(0)}% peak.`,
+                  `${hatchTag()} · exit written $${coin.symbol}: stop ${(r.playbook.stopPct * 100).toFixed(0)}% / trail +${(TRAIL_ARM * 100).toFixed(0)}% / −${(TRAIL_GIVE * 100).toFixed(0)}% peak.`,
                   { mint: coin.mint, symbol: coin.symbol },
                 );
                 set((s) =>
@@ -1293,49 +1545,21 @@ export const useTrench = create<TrenchState>()(
                 log(
                   "SNIPER",
                   "buy",
-                  `hatch · fill $${coin.symbol} ${fillUsd.toFixed(2)} usd · score ${scored.score} · ${scored.why}.`,
+                  `${hatchTag()} · fill $${coin.symbol} ${fillUsd.toFixed(2)} usd · score ${scored.score} · ${scored.why}.`,
                   { mint: coin.mint, symbol: coin.symbol },
                 );
                 const shadow = shadowQuote(fillUsd, st.solUsd);
                 log(
                   "TILL",
                   "sys",
-                  `SHADOW · hatch would spend ${shadow.sol.toFixed(3)} SOL ($${shadow.usd.toFixed(2)}) on $${coin.symbol} · cap ${LIVE_CAP_SOL} · wallet does not sign.`,
+                  `SHADOW · ${hatchTag()} would spend ${shadow.sol.toFixed(3)} SOL ($${shadow.usd.toFixed(2)}) on $${coin.symbol} · cap ${LIVE_CAP_SOL} · wallet does not sign.`,
                   { mint: coin.mint, symbol: coin.symbol },
                 );
-                const spiritFloor = Math.max(
-                  SCORE_FLOOR,
-                  useSpirit.getState().canon?.scoreFloor ?? SCORE_FLOOR,
-                );
-                const spiritOk = scored.score >= spiritFloor;
-                if (hotAutoArmed() && !spiritOk) {
-                  log(
-                    "TILL",
-                    "sys",
-                    `SPIRIT veto live $${coin.symbol} score ${scored.score} vs canon floor ${spiritFloor}. paper only.`,
-                    { mint: coin.mint, symbol: coin.symbol },
-                  );
-                }
-                if (hotAutoArmed() && spiritOk) {
-                  const mint = coin.mint;
-                  const symbol = coin.symbol;
-                  void hotBuy(mint, symbol).then((r) => {
-                    log("TILL", r.ok ? "till" : "sys", r.text, { mint, symbol });
-                    set({ lastHotLine: r.text });
-                    if (r.ok) pingNtfy("TRENCHER", `HOT 0.02 SOL $${symbol}`, true);
-                  });
-                } else if (signOneState() === "armed" && spiritOk) {
-                  const mint = coin.mint;
-                  const symbol = coin.symbol;
-                  void signOneBuy(mint, symbol).then((r) => {
-                    log("TILL", r.ok ? "till" : "sys", r.text, { mint, symbol });
-                    if (r.ok) pingNtfy("TRENCHER", `SIGNED 0.02 SOL $${symbol}`, true);
-                  });
-                }
+                fireLive("hatch", coin.mint, coin.symbol, scored.score);
                 log(
                   "TILL",
                   "till",
-                  `hatch · fee $${coin.symbol} ${feeUsd.toFixed(2)} usd.`,
+                  `${hatchTag()} · fee $${coin.symbol} ${feeUsd.toFixed(2)} usd.`,
                   { mint: coin.mint, symbol: coin.symbol },
                 );
               }
@@ -1352,7 +1576,7 @@ export const useTrench = create<TrenchState>()(
                   log(
                     "WARDEN",
                     "kill",
-                    `cub · veto $${coin.symbol} — scored ${scored.score} vs floor ${r.playbook.scoreFloor}. no beats the sniper.`,
+                    `${cubTag()} · veto $${coin.symbol} — scored ${scored.score} vs floor ${r.playbook.scoreFloor}. no beats the sniper.`,
                     { mint: coin.mint, symbol: coin.symbol },
                   );
                   set((s) =>
@@ -1363,16 +1587,16 @@ export const useTrench = create<TrenchState>()(
                   continue;
                 }
                 if (r.positions.length >= MAX_POSITIONS) {
-                  log("SNIPER", "scan", `cub · $${coin.symbol} passed warden. book is full.`);
+                  log("SNIPER", "scan", `${cubTag()} · $${coin.symbol} passed warden. book is full.`);
                   continue;
                 }
                 if (now - r.lastBuyAt < BUY_COOLDOWN_MS) {
-                  log("SNIPER", "scan", `cub · $${coin.symbol} passed warden. cooling down.`);
+                  log("SNIPER", "scan", `${cubTag()} · $${coin.symbol} passed warden. cooling down.`);
                   continue;
                 }
                 const intended = sizeByScore(r.cash, st.solUsd, scored.score);
                 if (intended < 4) {
-                  log("SNIPER", "sys", "cub · size under 4 usd. waiting on cash.");
+                  log("SNIPER", "sys", `${cubTag()} · size under 4 usd. waiting on cash.`);
                   continue;
                 }
                 const slipPct = paperSlip(coin.usdMcap);
@@ -1380,7 +1604,7 @@ export const useTrench = create<TrenchState>()(
                 const feeUsd = paperFee(fillUsd);
                 const debit = fillUsd + feeUsd;
                 if (r.cash < debit) {
-                  log("TILL", "till", `cub · $${coin.symbol} fill plus fee is ${debit.toFixed(2)}. not enough cash.`);
+                  log("TILL", "till", `${cubTag()} · $${coin.symbol} fill plus fee is ${debit.toFixed(2)}. not enough cash.`);
                   continue;
                 }
                 const mcap = Math.max(coin.usdMcap, 1);
@@ -1405,7 +1629,7 @@ export const useTrench = create<TrenchState>()(
                 log(
                   "RISK",
                   "sys",
-                  `cub · exit written $${coin.symbol}: stop ${(r.playbook.stopPct * 100).toFixed(0)}% / trail +${(TRAIL_ARM * 100).toFixed(0)}% / −${(TRAIL_GIVE * 100).toFixed(0)}% peak.`,
+                  `${cubTag()} · exit written $${coin.symbol}: stop ${(r.playbook.stopPct * 100).toFixed(0)}% / trail +${(TRAIL_ARM * 100).toFixed(0)}% / −${(TRAIL_GIVE * 100).toFixed(0)}% peak.`,
                   { mint: coin.mint, symbol: coin.symbol },
                 );
                 set((s) =>
@@ -1424,9 +1648,10 @@ export const useTrench = create<TrenchState>()(
                 log(
                   "SNIPER",
                   "buy",
-                  `cub · fill $${coin.symbol} ${fillUsd.toFixed(2)} usd · score ${scored.score} · ${scored.why}.`,
+                  `${cubTag()} · fill $${coin.symbol} ${fillUsd.toFixed(2)} usd · score ${scored.score} · ${scored.why}.`,
                   { mint: coin.mint, symbol: coin.symbol },
                 );
+                fireLive("cub", coin.mint, coin.symbol, scored.score);
               }
             }
 
@@ -1503,6 +1728,7 @@ export const useTrench = create<TrenchState>()(
                   score: p.score ?? 0,
                   slipPct: p.slipPct ?? 0,
                   feeUsd: fees,
+                  rail: p.live || isLiveMint(p.mint) ? "sol" : "paper",
                 };
                 set((s) => ({
                   cash: s.cash + net,
@@ -1521,6 +1747,7 @@ export const useTrench = create<TrenchState>()(
                       ? `trailed $${p.symbol} off peak. now +${(pct * 100).toFixed(0)}% after ${heldLabel}. no hard take.`
                       : `time stop $${p.symbol} ${(pct * 100).toFixed(0)}% after ${heldLabel}.`;
                 log("RISK", "sell", line, { mint: p.mint, symbol: p.symbol });
+                fireLiveSell(p);
                 log(
                   "TILL",
                   "till",
@@ -1588,6 +1815,7 @@ export const useTrench = create<TrenchState>()(
                       score: p.score ?? 0,
                       slipPct: p.slipPct ?? 0,
                       feeUsd: fees,
+                      rail: p.live || isLiveMint(p.mint) ? "sol" : "paper",
                     };
                     const learned = absorbTrade(trade, rNow.playbook, get().meta);
                     set((s) =>
@@ -1615,27 +1843,19 @@ export const useTrench = create<TrenchState>()(
                         : `${Math.round(held / 60000)}m`;
                     const line =
                       reason === "stop"
-                        ? `hatch · stopped $${p.symbol} at ${(pct * 100).toFixed(0)}% in ${heldLabel}.`
+                        ? `${hatchTag()} · stopped $${p.symbol} at ${(pct * 100).toFixed(0)}% in ${heldLabel}.`
                         : reason === "take"
-                          ? `hatch · took profit on $${p.symbol} +${(pct * 100).toFixed(0)}% after ${heldLabel}.`
-                          : `hatch · time stop $${p.symbol} ${(pct * 100).toFixed(0)}% after ${heldLabel}.`;
+                          ? `${hatchTag()} · took profit on $${p.symbol} +${(pct * 100).toFixed(0)}% after ${heldLabel}.`
+                          : `${hatchTag()} · time stop $${p.symbol} ${(pct * 100).toFixed(0)}% after ${heldLabel}.`;
                     log("RISK", "sell", line, { mint: p.mint, symbol: p.symbol });
-                    if (hotAutoArmed()) {
-                      const mint = p.mint;
-                      const symbol = p.symbol;
-                      void hotSell(mint, symbol).then((r) => {
-                        log("TILL", r.ok ? "till" : "sys", r.text, { mint, symbol });
-                        set({ lastHotLine: r.text });
-                        if (r.ok) pingNtfy("TRENCHER", `HOT SELL $${symbol}`, true);
-                      });
-                    }
+                    fireLiveSell(p);
                     pingNtfy(
                       reason === "take" ? "TAKE" : "STOP",
-                      `hatch $${p.symbol} ${(pct * 100).toFixed(0)}% ${reason} · ${get().rival?.cash.toFixed(2) ?? "—"} cash`,
+                      `${hatchTag()} $${p.symbol} ${(pct * 100).toFixed(0)}% ${reason} · ${get().rival?.cash.toFixed(2) ?? "—"} cash`,
                       true,
                     );
                     for (const e of learned.lessons) {
-                      log(e.agent, "sys", `hatch · ${e.text}`);
+                      log(e.agent, "sys", `${hatchTag()} · ${e.text}`);
                     }
                   }
                 }
@@ -1689,6 +1909,7 @@ export const useTrench = create<TrenchState>()(
                       score: p.score ?? 0,
                       slipPct: p.slipPct ?? 0,
                       feeUsd: Math.round((feeBuy + feeSell) * 100) / 100,
+                      rail: "paper",
                     };
                     const learned = absorbTrade(trade, rNow.playbook, get().meta);
                     set((s) =>
@@ -1713,12 +1934,13 @@ export const useTrench = create<TrenchState>()(
                     log(
                       "RISK",
                       "sell",
-                      `cub · ${reason} $${p.symbol} ${(pct * 100).toFixed(0)}%.`,
+                      `${cubTag()} · ${reason} $${p.symbol} ${(pct * 100).toFixed(0)}%.`,
                       { mint: p.mint, symbol: p.symbol },
                     );
+                    fireLiveSell(p);
                     pingNtfy(
                       reason === "take" ? "TAKE" : "STOP",
-                      `cub $${p.symbol} ${(pct * 100).toFixed(0)}% ${reason} · ${get().extra?.cash.toFixed(2) ?? "—"} cash`,
+                      `${cubTag()} $${p.symbol} ${(pct * 100).toFixed(0)}% ${reason} · ${get().extra?.cash.toFixed(2) ?? "—"} cash`,
                       true,
                     );
                   }
@@ -1806,7 +2028,7 @@ export const useTrench = create<TrenchState>()(
                 : live.extra
                   ? "dead"
                   : "—";
-              ntfyHeartbeat(`vet $${v} · hatch $${h} · cub $${c}`);
+              ntfyHeartbeat(`${vetTag()} $${v} · ${hatchTag()} $${h} · ${cubTag()} $${c}`);
             }
           } catch (err) {
             log(
@@ -2079,13 +2301,41 @@ export const useTrench = create<TrenchState>()(
                 : 0,
           kills: Array.isArray(p.kills) ? p.kills : [],
           lessons: Array.isArray(p.lessons) ? p.lessons : [],
-          rival: p.rival && typeof p.rival === "object" ? (p.rival as Rival) : null,
-          extra: p.extra && typeof p.extra === "object" ? (p.extra as Rival) : null,
+          rival:
+            p.rival && typeof p.rival === "object"
+              ? {
+                  ...(p.rival as Rival),
+                  callsign:
+                    (p.rival as Rival).callsign ||
+                    mintCallsign([typeof p.callsign === "string" ? p.callsign : ""]),
+                }
+              : null,
+          extra:
+            p.extra && typeof p.extra === "object"
+              ? {
+                  ...(p.extra as Rival),
+                  callsign:
+                    (p.extra as Rival).callsign ||
+                    mintCallsign([
+                      typeof p.callsign === "string" ? p.callsign : "",
+                      (p.rival as Rival | null)?.callsign ?? "",
+                    ]),
+                }
+              : null,
           focus: p.focus === "hatch" || p.focus === "cub" ? p.focus : "vet",
           vetDead: p.vetDead === true,
           housePot: typeof p.housePot === "number" ? p.housePot : 0,
           houseBank: typeof p.houseBank === "number" ? p.houseBank : 0,
           lastHotLine: typeof p.lastHotLine === "string" ? p.lastHotLine : null,
+          callsign:
+            typeof p.callsign === "string" && p.callsign
+              ? p.callsign
+              : mintCallsign(
+                  [
+                    (p.rival as Rival | null)?.callsign,
+                    (p.extra as Rival | null)?.callsign,
+                  ].filter(Boolean) as string[],
+                ),
           round: typeof p.round === "number" && p.round > 0 ? p.round : 1,
           roundStartedAt:
             typeof p.roundStartedAt === "number"
@@ -2130,6 +2380,7 @@ export const useTrench = create<TrenchState>()(
         housePot: s.housePot ?? 0,
         houseBank: s.houseBank ?? 0,
         lastHotLine: s.lastHotLine ?? null,
+        callsign: s.callsign || "",
         round: s.round ?? 1,
         roundStartedAt: s.roundStartedAt,
         agents: s.agents,

@@ -1,5 +1,5 @@
 import { FEE_RATE, FLAT_AFTER_MS, GRADE_AFTER_MS, MAX_BUY_SOL, SCORE_FLOOR, STOP_LOSS, TAKE_PROFIT, TRAIL_ARM, TRAIL_GIVE } from "./types";
-import type { ClosedTrade, KillGrade, KillKind, KillRecord, Lesson, MetaState, Playbook, PumpCoin, SellReason } from "./types";
+import type { ClosedTrade, KillGrade, KillKind, KillRecord, LaneId, Lesson, MetaState, Playbook, PumpCoin, SellReason } from "./types";
 
 export const CLUSTERS: Record<string, string[]> = {
   stocks: [
@@ -452,14 +452,20 @@ export function absorbKill(
   };
 }
 
-export function wardenScore(kills: KillRecord[]): { held: number; missed: number; pending: number } {
-  const judged = kills.filter(
-    (k) => (k.kind === "score" || k.kind === "meta") && (k.grade === "rugged" || k.grade === "ran"),
-  );
+export function wardenScore(kills: KillRecord[]): {
+  held: number;
+  missed: number;
+  pending: number;
+  acc: number;
+} {
+  const judged = kills.filter((k) => k.grade === "rugged" || k.grade === "ran");
+  const held = judged.filter((k) => k.grade === "rugged").length;
+  const missed = judged.filter((k) => k.grade === "ran").length;
   return {
-    held: judged.filter((k) => k.grade === "rugged").length,
-    missed: judged.filter((k) => k.grade === "ran").length,
-    pending: kills.filter((k) => k.grade === "pending" && (k.kind === "score" || k.kind === "meta")).length,
+    held,
+    missed,
+    pending: kills.filter((k) => k.grade === "pending").length,
+    acc: judged.length ? held / judged.length : 0,
   };
 }
 
@@ -580,4 +586,26 @@ export function snapshotText(input: {
 Cash ${input.cash.toFixed(2)} equity ${input.equity.toFixed(2)} scanned ${input.scanned} killed ${input.killed} trades ${input.trades}${book}${loss}
 Live tape:
 ${tape}`;
+}
+
+export function pickHotLane(
+  now: number,
+  seats: Array<{
+    id: LaneId;
+    hunting: boolean;
+    closed: { pnlUsd: number }[];
+    startedAt: number | null;
+  }>,
+): LaneId | null {
+  const rows = seats
+    .filter((s) => s.hunting)
+    .map((s) => {
+      const n = s.closed.length;
+      const win = n ? s.closed.filter((t) => t.pnlUsd > 0).length / n : 0;
+      const ageDays = s.startedAt ? Math.max(0, now - s.startedAt) / 86_400_000 : 0;
+      return { id: s.id, n, win, ageDays, merit: win * 100 + ageDays };
+    });
+  if (!rows.length) return null;
+  rows.sort((a, b) => b.merit - a.merit || b.n - a.n || b.ageDays - a.ageDays);
+  return rows[0].id;
 }

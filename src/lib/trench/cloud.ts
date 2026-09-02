@@ -63,23 +63,23 @@ function unpack(raw: string) {
 
 export async function seatCloud(pin: string): Promise<string> {
   const p = pin.trim();
-  if (p.length < 4) return "desk code needs 4+ characters.";
+  if (p.length < 4) return "chamber # needs 4+ characters.";
   setDeskPin(p);
   const res = await pushDesk({ data: { pin: p, blob: pack(), hunterId: hunterId() } });
   if (!res.ok) return res.error;
   hunter = true;
-  return "cloud seated. phone uses the same code.";
+  return "chamber live. anyone with this number can Watch.";
 }
 
 export async function unlockCloud(pin: string): Promise<string> {
   const p = pin.trim();
-  if (p.length < 4) return "desk code needs 4+ characters.";
+  if (p.length < 4) return "chamber # needs 4+ characters.";
   setDeskPin(p);
   const res = await pullDesk({ data: { pin: p, hunterId: hunterId() } });
   if (!res.ok) return res.error;
   unpack(res.blob);
   hunter = res.hunter;
-  return res.hunter ? "unlocked. this tab hunts." : "unlocked. watching the hunter tab.";
+  return res.hunter ? "this tab is the hunter." : "watching the chamber. hunter tab still trades.";
 }
 
 export async function syncCloud(push: boolean): Promise<"hunter" | "watch" | "off"> {

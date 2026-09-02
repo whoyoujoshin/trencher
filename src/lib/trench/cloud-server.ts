@@ -12,17 +12,19 @@ export const pullDesk = createServerFn({ method: "POST" })
     hunterId: String(input.hunterId ?? "").slice(0, 80),
   }))
   .handler(async ({ data }) => {
-    if (data.pin.length < 4) return { ok: false as const, error: "desk code too short" };
+    if (data.pin.length < 4) return { ok: false as const, error: "chamber # too short" };
     const sql = await getSql();
+    const pinHash = hashPin(data.pin);
     const rows = await sql<{
+      id: string;
       blob: string;
       pin_hash: string;
       hunter_id: string | null;
       hunter_until: string | null;
-    }>`select blob, pin_hash, hunter_id, hunter_until from trench_desk where id = ${"main"}`;
+    }>`select id, blob, pin_hash, hunter_id, hunter_until from trench_desk where id = ${pinHash} or (id = ${"main"} and pin_hash = ${pinHash}) limit 1`;
     const row = rows[0];
-    if (!row) return { ok: false as const, error: "no cloud desk yet. seat it from the live tab." };
-    if (row.pin_hash !== hashPin(data.pin)) return { ok: false as const, error: "wrong desk code." };
+    if (!row) return { ok: false as const, error: "no chamber yet. host it from the live tab." };
+    if (row.pin_hash !== pinHash) return { ok: false as const, error: "wrong chamber #." };
     const until = row.hunter_until ? Date.parse(row.hunter_until) : 0;
     const mine =
       !row.hunter_id ||
@@ -34,7 +36,7 @@ export const pullDesk = createServerFn({ method: "POST" })
       await sql`
         update trench_desk
         set hunter_id = ${data.hunterId}, hunter_until = ${next}
-        where id = ${"main"} and pin_hash = ${row.pin_hash}
+        where id = ${row.id} and pin_hash = ${row.pin_hash}
       `;
     }
     return {
@@ -51,20 +53,25 @@ export const pushDesk = createServerFn({ method: "POST" })
     hunterId: String(input.hunterId ?? "").slice(0, 80),
   }))
   .handler(async ({ data }) => {
-    if (data.pin.length < 4) return { ok: false as const, error: "desk code too short" };
+    if (data.pin.length < 4) return { ok: false as const, error: "chamber # too short" };
     if (!data.blob) return { ok: false as const, error: "empty desk" };
     const sql = await getSql();
     const pinHash = hashPin(data.pin);
-    const rows = await sql<{ pin_hash: string }>`select pin_hash from trench_desk where id = ${"main"}`;
+    const rows = await sql<{ id: string; pin_hash: string }>`
+      select id, pin_hash from trench_desk
+      where id = ${pinHash} or (id = ${"main"} and pin_hash = ${pinHash})
+      limit 1
+    `;
     const existing = rows[0];
     if (existing && existing.pin_hash !== pinHash) {
-      return { ok: false as const, error: "wrong desk code." };
+      return { ok: false as const, error: "wrong chamber #." };
     }
     const until = new Date(Date.now() + 20_000).toISOString();
+    const deskId = existing?.id ?? pinHash;
     if (!existing) {
       await sql`
         insert into trench_desk (id, pin_hash, blob, hunter_id, hunter_until, updated_at)
-        values (${"main"}, ${pinHash}, ${data.blob}, ${data.hunterId || null}, ${until}, now())
+        values (${deskId}, ${pinHash}, ${data.blob}, ${data.hunterId || null}, ${until}, now())
       `;
     } else {
       await sql`
@@ -73,7 +80,7 @@ export const pushDesk = createServerFn({ method: "POST" })
             hunter_id = ${data.hunterId || null},
             hunter_until = ${until},
             updated_at = now()
-        where id = ${"main"} and pin_hash = ${pinHash}
+        where id = ${deskId} and pin_hash = ${pinHash}
       `;
     }
     return { ok: true as const, hunter: true };

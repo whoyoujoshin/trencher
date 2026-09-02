@@ -172,11 +172,11 @@ export function SpiritBox() {
                   const on = selected?.id === s.id;
                   const p = s.book.playbook;
                   return (
-                    <li key={s.id}>
+                    <li key={s.id} className="flex items-stretch border-b border-line">
                       <button
                         type="button"
                         onClick={() => select(s.id)}
-                        className={`flex w-full flex-col items-start gap-0.5 border-b border-line px-4 py-3 text-left sm:px-5 ${
+                        className={`flex min-w-0 flex-1 flex-col items-start gap-0.5 px-4 py-3 text-left sm:px-5 ${
                           on ? "bg-elevated" : "hover:bg-surface"
                         }`}
                       >
@@ -191,6 +191,17 @@ export function SpiritBox() {
                           {" · "}
                           {when(s.book.savedAt || s.addedAt)}
                         </span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          forget(s.id);
+                          setMsg("grave dropped. spirit is untouched.");
+                        }}
+                        className="shrink-0 self-stretch border-l border-line px-3 font-mono text-2xs tracking-label text-subtle uppercase hover:bg-surface hover:text-fg"
+                      >
+                        drop
                       </button>
                     </li>
                   );

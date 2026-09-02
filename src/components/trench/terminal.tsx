@@ -32,12 +32,13 @@ import {
   disconnectWallet,
   ensureHot,
   hotAutoArmed,
+  isLiveMint,
   refreshHot,
   refreshWallet,
   setHotAuto,
   signOneState,
 } from "@/lib/trench/wallet";
-import { blankPlaybook, pnlPct, positionValue, wardenScore } from "@/lib/trench/logic";
+import { blankPlaybook, pickHotLane, pnlPct, positionValue, wardenScore } from "@/lib/trench/logic";
 
 const ICONS: Record<AgentId, typeof Radio> = {
   SCOUT: Radio,
@@ -47,6 +48,20 @@ const ICONS: Record<AgentId, typeof Radio> = {
   TILL: Landmark,
   META: Brain,
 };
+
+function railOf(
+  t: { mint: string; symbol: string; rail?: "paper" | "sol"; live?: boolean },
+  logs: { mint?: string; symbol?: string; text: string }[],
+): "paper" | "sol" {
+  if (t.rail === "sol" || t.live) return "sol";
+  if (isLiveMint(t.mint)) return "sol";
+  const hit = logs.some(
+    (l) =>
+      (l.mint === t.mint || l.symbol === t.symbol || l.text.includes(`$${t.symbol}`)) &&
+      (l.text.includes("HOT ·") || l.text.includes("HOT SELL") || l.text.startsWith("SIGNED")),
+  );
+  return hit ? "sol" : "paper";
+}
 
 export function TrenchApp() {
   return (
@@ -418,17 +433,17 @@ function CloudDock() {
       <input
         value={pin}
         onChange={(e) => setPin(e.target.value)}
-        placeholder="desk code"
+        placeholder="chamber #"
         spellCheck={false}
         autoCapitalize="off"
         autoCorrect="off"
         className="h-9 w-36 border border-line bg-elevated px-2 font-mono text-2xs text-fg placeholder:text-subtle"
       />
       <Button size="sm" variant="ghost" disabled={busy} onClick={() => void seat()}>
-        Seat cloud
+        Chamber #
       </Button>
       <Button size="sm" variant="ghost" disabled={busy} onClick={() => void unlock()}>
-        Unlock
+        Watch
       </Button>
       {msg ? <p className="font-mono text-2xs text-subtle">{msg}</p> : null}
     </div>
@@ -569,7 +584,6 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
   const vetDead = useTrench((s) => s.vetDead);
   const rival = useTrench((s) => s.rival);
   const extra = useTrench((s) => s.extra);
-  const housePot = useTrench((s) => s.housePot);
   const houseBank = useTrench((s) => s.houseBank);
   const hotSol = useTrench((s) => s.hotSol);
   const hotPubkey = useTrench((s) => s.hotPubkey);
@@ -582,7 +596,6 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
   const spawnRival = useTrench((s) => s.spawnRival);
   const cull = useTrench((s) => s.cull);
   const setFocus = useTrench((s) => s.setFocus);
-  const spectate = useTrench((s) => s.spectate);
   const goHome = useTrench((s) => s.goHome);
   const rentPaid = useTrench((s) => s.rentPaid);
   const status = useTrench((s) => s.status);
@@ -590,14 +603,13 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
   const killed = useTrench((s) => s.killed);
   const meta = useTrench((s) => s.meta);
   const payRent = useTrench((s) => s.payRent);
-  const askMeta = useTrench((s) => s.askMeta);
-  const readLosers = useTrench((s) => s.readLosers);
-  const grokBusy = useTrench((s) => s.grokBusy);
-  const grokLastAt = useTrench((s) => s.grokLastAt);
   const ticking = useTrench((s) => s.ticking);
   const tapeError = useTrench((s) => s.tapeError);
   const kills = useTrench((s) => s.kills);
   const house = useTrench((s) => s.house);
+  const vetSign = useTrench((s) => s.callsign) || "BODY";
+  const hatchSign = rival?.callsign || "BODY";
+  const cubSign = extra?.callsign || "BODY";
   const [now, setNow] = useState(Date.now());
 
   useEffect(() => {
@@ -619,8 +631,6 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
 
   const equity = equityNow(cash, positions);
   const pnl = equity - STARTING_CASH;
-  const grokWait = Math.max(0, 20 - Math.floor((now - grokLastAt) / 1000));
-  const canReview = closed.filter((c) => c.pnlUsd < 0).length >= 2;
   const ward = wardenScore(kills ?? []);
   const rank = deskMastery({
     lessons,
@@ -644,10 +654,37 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
   const eqC = extra ? equityNow(extra.cash, extra.positions) : 0;
   const liveCount = (vetLive ? 1 : 0) + (hatchLive ? 1 : 0) + (cubLive ? 1 : 0);
   const cellFull = hatchLive && cubLive;
-  const canPay =
-    (!vetDead && !rentPaid && vetCash >= RENT_USD) ||
-    (hatchLive && !!rival && !rival.rentPaid && rival.cash >= RENT_USD) ||
-    (cubLive && !!extra && !extra.rentPaid && extra.cash >= RENT_USD);
+  const focusSign = cubFocus ? cubSign : hatchFocus ? hatchSign : vetSign;
+  const focusCash = cubFocus ? extra?.cash ?? 0 : hatchFocus ? rival?.cash ?? 0 : vetCash;
+  const focusSitting = cubFocus ? !!extra?.rentPaid : hatchFocus ? !!rival?.rentPaid : rentPaid;
+  const focusHunting = cubFocus ? cubLive : hatchFocus ? hatchLive : vetLive;
+  const canPay = focusHunting && !focusSitting && focusCash >= RENT_USD;
+  const huntCount =
+    (vetLive && !rentPaid ? 1 : 0) +
+    (hatchLive && rival && !rival.rentPaid ? 1 : 0) +
+    (cubLive && extra && !extra.rentPaid ? 1 : 0);
+  const hotId = pickHotLane(now, [
+    {
+      id: "vet",
+      hunting: vetLive && !rentPaid,
+      closed: vetClosed,
+      startedAt: vetStarted,
+    },
+    {
+      id: "hatch",
+      hunting: hatchLive && !!rival && !rival.rentPaid,
+      closed: rival?.closed ?? [],
+      startedAt: rival?.startedAt ?? null,
+    },
+    {
+      id: "cub",
+      hunting: cubLive && !!extra && !extra.rentPaid,
+      closed: extra?.closed ?? [],
+      startedAt: extra?.startedAt ?? null,
+    },
+  ]);
+  const hotSign =
+    hotId === "cub" ? cubSign : hotId === "hatch" ? hatchSign : hotId === "vet" ? vetSign : "—";
 
   return (
     <div className="min-h-dvh overflow-x-hidden bg-bg text-fg">
@@ -673,7 +710,7 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
                   focus === "vet" ? "border-fg text-fg" : "border-line text-muted hover:text-fg",
                 )}
               >
-                vet {vetLive ? (rentPaid ? `rest ${formatUsd(eqV)}` : formatUsd(eqV)) : "dead"}
+                {vetSign} {vetLive ? (rentPaid ? `rest ${formatUsd(eqV)}` : formatUsd(eqV)) : "dead"}
               </button>
               {rival ? (
                 <button
@@ -684,7 +721,7 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
                     focus === "hatch" ? "border-fg text-fg" : "border-line text-muted hover:text-fg",
                   )}
                 >
-                  hatch {hatchLive ? (rival.rentPaid ? `rest ${formatUsd(eqH)}` : formatUsd(eqH)) : "dead"}
+                  {hatchSign} {hatchLive ? (rival.rentPaid ? `rest ${formatUsd(eqH)}` : formatUsd(eqH)) : "dead"}
                 </button>
               ) : null}
               {extra ? (
@@ -696,7 +733,7 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
                     focus === "cub" ? "border-fg text-fg" : "border-line text-muted hover:text-fg",
                   )}
                 >
-                  cub {cubLive ? (extra.rentPaid ? `rest ${formatUsd(eqC)}` : formatUsd(eqC)) : "dead"}
+                  {cubSign} {cubLive ? (extra.rentPaid ? `rest ${formatUsd(eqC)}` : formatUsd(eqC)) : "dead"}
                 </button>
               ) : null}
             </div>
@@ -707,20 +744,20 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
             {(rival || extra) && status !== "watch" ? (
               <>
                 <Stat
-                  label="Vet"
+                  label={vetSign}
                   value={vetLive ? formatUsd(eqV) : "dead"}
                   tone={!vetLive ? "loss" : eqV - STARTING_CASH >= 0 ? "gain" : "loss"}
                 />
                 {rival ? (
                   <Stat
-                    label="Hatch"
+                    label={hatchSign}
                     value={hatchLive ? formatUsd(eqH) : "dead"}
                     tone={!hatchLive ? "loss" : eqH - STARTING_CASH >= 0 ? "gain" : "loss"}
                   />
                 ) : null}
                 {extra ? (
                   <Stat
-                    label="Cub"
+                    label={cubSign}
                     value={cubLive ? formatUsd(eqC) : "dead"}
                     tone={!cubLive ? "loss" : eqC - STARTING_CASH >= 0 ? "gain" : "loss"}
                   />
@@ -756,8 +793,16 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
             />
             <Stat
               label="Ward"
-              value={ward.held + ward.missed ? `${ward.held}–${ward.missed}` : "—"}
-              tone={ward.missed > ward.held ? "loss" : ward.held ? "gain" : undefined}
+              value={ward.held + ward.missed ? `${(ward.acc * 100).toFixed(0)}%` : "—"}
+              tone={
+                !(ward.held + ward.missed)
+                  ? undefined
+                  : ward.acc >= 0.7
+                    ? "gain"
+                    : ward.acc < 0.45
+                      ? "loss"
+                      : "warn"
+              }
             />
             <Stat label="Clock" value={startedAt ? elapsed(startedAt, now) : "00:00"} />
             <Stat
@@ -772,11 +817,6 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
                     })()
                   : `R${round || 1}`
               }
-            />
-            <Stat
-              label="Pot"
-              value={formatUsd(housePot ?? 0)}
-              tone={(housePot ?? 0) > 0 ? "gain" : undefined}
             />
             <Stat
               label="Bank"
@@ -809,7 +849,7 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
             />
             <Stat
               label="Auto"
-              value={hotAutoArmed() ? "on · hatch" : "off"}
+              value={hotAutoArmed() ? `on · ${hotSign}` : "off"}
               tone={hotAutoArmed() ? "gain" : "warn"}
             />
             <Stat
@@ -840,7 +880,7 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
             />
           </dl>
           <p className="font-mono text-2xs text-subtle">
-            Cash, bank, pot, rent, PnL are paper. Only this row spends SOL.
+            Cash, bank, rent, PnL are paper. Only this row spends SOL.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2 border-t border-line px-4 py-2 sm:px-6">
@@ -851,36 +891,21 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
             {" · "}stop {(playbook.stopPct * 100).toFixed(0)}%
             {" · "}trail +{(TRAIL_ARM * 100).toFixed(0)}%/−{(TRAIL_GIVE * 100).toFixed(0)}% peak
             {playbook.bannedCreators.length ? ` · ${playbook.bannedCreators.length} burned` : ""}
-            {cubFocus ? " · cub" : hatchFocus ? " · hatchling" : rival || extra ? " · veteran" : ""}
+            {` · ${cubFocus ? cubSign : hatchFocus ? hatchSign : vetSign}`}
+            {` · ${rank.label}`}
           </p>
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={grokBusy || grokWait > 0}
-            onClick={() => void askMeta()}
-          >
-            {grokBusy ? "Reading…" : grokWait > 0 ? `Meta ${grokWait}s` : "Ask Meta"}
-          </Button>
-          <Button
-            size="sm"
-            variant="ghost"
-            disabled={!canReview || grokBusy || grokWait > 0}
-            onClick={() => void readLosers()}
-          >
-            Read the losers
-          </Button>
           <BookDock compact />
           <NtfyDock />
           <CloudDock />
           <WalletDock />
           {status !== "watch" && !cellFull && (vetLive || hatchLive || cubLive) ? (
             <Button size="sm" variant="ghost" onClick={() => spawnRival()}>
-              {hatchLive ? "Wake the cub" : "Wake the hatchling"}
+              Wake a body
             </Button>
           ) : null}
-          {status !== "watch" && liveCount >= 2 ? (
+          {status !== "watch" && huntCount >= 2 ? (
             <Button size="sm" variant="ghost" onClick={() => cull()}>
-              Cull the weaker
+              Cull {focusSign}
             </Button>
           ) : null}
           <Button
@@ -889,9 +914,9 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
             disabled={!canPay}
             onClick={() => payRent()}
           >
-            {rentPaid || rival?.rentPaid || extra?.rentPaid
-              ? "Sitting"
-              : `Pay rent ${formatUsd(RENT_USD, 0)}`}
+            {focusSitting
+              ? `${focusSign} sitting`
+              : `Pay ${focusSign} ${formatUsd(RENT_USD, 0)}`}
           </Button>
         </div>
       </header>
@@ -907,7 +932,7 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
             now={now}
             closed={closed}
             lessons={lessons}
-            lane={cubFocus ? "cub" : hatchFocus ? "hatch" : "vet"}
+            lane={cubFocus ? cubSign : hatchFocus ? hatchSign : vetSign}
           />
           <Tape />
         </aside>
@@ -1053,11 +1078,20 @@ function Book({
 }: {
   positions: Position[];
   now: number;
-  closed: { mint: string; closedAt: number; symbol: string; pnlUsd: number; pnlPct: number; reason: string }[];
+  closed: {
+    mint: string;
+    closedAt: number;
+    symbol: string;
+    pnlUsd: number;
+    pnlPct: number;
+    reason: string;
+    rail?: "paper" | "sol";
+  }[];
   lessons: { id: string; agent: string; text: string }[];
   lane: string;
 }) {
   const kills = useTrench((s) => s.kills) ?? [];
+  const logs = useTrench((s) => s.logs);
   const graded = kills.filter((k) => k.grade !== "pending");
   return (
     <section className="px-4 py-4 sm:px-5">
@@ -1069,7 +1103,7 @@ function Book({
       ) : (
         <ul className="mt-3 flex flex-col gap-2">
           {positions.map((p) => (
-            <PositionRow key={p.mint} p={p} now={now} />
+            <PositionRow key={p.mint} p={p} now={now} logs={logs} />
           ))}
         </ul>
       )}
@@ -1101,7 +1135,9 @@ function Book({
         <div className="mt-5">
           <h3 className="font-mono text-micro tracking-label text-subtle uppercase">Closed</h3>
           <ul className="mt-2 flex flex-col gap-1.5">
-            {closed.slice(0, 8).map((t) => (
+            {closed.slice(0, 8).map((t) => {
+              const rail = railOf(t, logs);
+              return (
               <li
                 key={`${t.mint}-${t.closedAt}`}
                 className="flex items-center justify-between gap-3 font-mono text-2xs"
@@ -1112,10 +1148,12 @@ function Book({
                     t.pnlUsd >= 0 ? "text-gain tabular-nums" : "text-loss tabular-nums"
                   }
                 >
-                  {formatPct(t.pnlPct)} · {formatUsd(t.pnlUsd)} · {t.reason}
+                  {formatPct(t.pnlPct)} · {formatUsd(t.pnlUsd)} · {t.reason} ·{" "}
+                  <span className={rail === "sol" ? "text-gain" : "text-subtle"}>{rail}</span>
                 </span>
               </li>
-            ))}
+              );
+            })}
           </ul>
         </div>
       )}
@@ -1123,9 +1161,18 @@ function Book({
   );
 }
 
-function PositionRow({ p, now }: { p: Position; now: number }) {
+function PositionRow({
+  p,
+  now,
+  logs,
+}: {
+  p: Position;
+  now: number;
+  logs: { mint?: string; symbol?: string; text: string }[];
+}) {
   const pct = pnlPct(p.costUsd, p.entryMcap, p.lastMcap);
   const value = positionValue(p.costUsd, p.entryMcap, p.lastMcap);
+  const rail = railOf(p, logs);
   return (
     <li className="rounded-md border border-line bg-surface px-3 py-2.5">
       <div className="flex items-start gap-3">
@@ -1155,6 +1202,7 @@ function PositionRow({ p, now }: { p: Position; now: number }) {
             {typeof p.score === "number" ? ` · score ${p.score}` : ""}
             {p.slipPct ? ` · slip ${(p.slipPct * 100).toFixed(1)}%` : ""}
             {p.feeUsd ? ` · fee ${formatUsd(p.feeUsd)}` : ""}
+            {` · ${rail}`}
           </p>
         </div>
       </div>

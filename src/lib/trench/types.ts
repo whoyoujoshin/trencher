@@ -46,6 +46,7 @@ export type Position = {
   intendedUsd: number;
   slipPct: number;
   feeUsd: number;
+  live?: boolean;
 };
 
 export type ClosedTrade = {
@@ -64,6 +65,7 @@ export type ClosedTrade = {
   score: number;
   slipPct: number;
   feeUsd: number;
+  rail?: "paper" | "sol";
 };
 
 export type LogLine = {

@@ -1,0 +1,136 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@theme {
+  --font-sans: "IBM Plex Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "IBM Plex Mono", ui-monospace, "SF Mono", Menlo, monospace;
+
+  --color-bg: #08090b;
+  --color-surface: #111317;
+  --color-elevated: #181b21;
+  --color-fg: #ecece8;
+  --color-muted: #8b8e86;
+  --color-subtle: #5c5f58;
+  --color-line: #25282e;
+  --color-primary: #ecece8;
+  --color-primary-fg: #08090b;
+  --color-gain: #7dcea0;
+  --color-loss: #d97870;
+  --color-warn: #c4a574;
+
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 16px;
+  --radius-xl: 22px;
+
+  --text-display: clamp(3.4rem, 14vw, 6.5rem);
+  --text-2xs: 0.6875rem;
+  --text-micro: 0.625rem;
+  --tracking-kicker: 0.22em;
+  --tracking-label: 0.16em;
+
+  --ease-out-smooth: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+  }
+
+  html,
+  body,
+  #app {
+    min-height: 100%;
+    background: var(--color-bg);
+    color: var(--color-fg);
+  }
+
+  body {
+    font-family: var(--font-sans);
+  }
+
+  button:not(:disabled),
+  [role="button"]:not(:disabled) {
+    cursor: pointer;
+  }
+
+  ::selection {
+    background: var(--color-fg);
+    color: var(--color-bg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stagger-in {
+    animation: none !important;
+    opacity: 1 !important;
+    filter: none !important;
+    transform: none !important;
+  }
+}
+
+@keyframes fade-up {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+    filter: blur(3px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+    filter: blur(0);
+  }
+}
+
+.stagger-in {
+  opacity: 0;
+  animation: fade-up 400ms var(--ease-out-smooth) forwards;
+}
+.stagger-in:nth-child(1) {
+  animation-delay: 40ms;
+}
+.stagger-in:nth-child(2) {
+  animation-delay: 90ms;
+}
+.stagger-in:nth-child(3) {
+  animation-delay: 140ms;
+}
+.stagger-in:nth-child(4) {
+  animation-delay: 190ms;
+}
+.stagger-in:nth-child(5) {
+  animation-delay: 240ms;
+}
+
+@keyframes shimmer-sweep {
+  0% {
+    background-position: 100% 0;
+  }
+  100% {
+    background-position: -100% 0;
+  }
+}
+
+.shimmer {
+  background-image: linear-gradient(
+    90deg,
+    transparent 0%,
+    color-mix(in oklab, var(--color-fg) 18%, transparent) 50%,
+    transparent 100%
+  );
+  background-size: 200% 100%;
+  background-clip: text;
+  -webkit-background-clip: text;
+  color: var(--color-muted);
+  animation: shimmer-sweep 2.4s linear infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .shimmer {
+    animation: none;
+    color: var(--color-muted);
+    background: none;
+  }
+}

@@ -1,0 +1,11 @@
+node_modules
+.vercel
+.nitro
+.git
+screenshots
+artifacts
+attachments
+*.log
+.project_id
+.grok/skills
+.grok/references

@@ -14,11 +14,12 @@ import { useSpirit } from "@/lib/trench/spirit";
 import {
   AGENTS,
   CYCLE_MS,
-  RENT_USD,
+  CYCLE_PONS_MS,
   ROUND_MS,
   STARTING_CASH,
   TRAIL_ARM,
   TRAIL_GIVE,
+  gateUsd,
   type AgentId,
   type KillRecord,
   type LogLine,
@@ -26,13 +27,17 @@ import {
 } from "@/lib/trench/types";
 import { ageLabel, cn, elapsed, formatPct, formatUsd, shortAddr, vaultPressure } from "@/lib/utils";
 import { ntfyTopic, pingNtfy, setNtfyTopic } from "@/lib/trench/ntfy";
-import { amHunter, deskPin, seatCloud, syncCloud, unlockCloud } from "@/lib/trench/cloud";
+import { amHunter, chamberEyes, deskPin, seatCloud, syncCloud, unlockCloud } from "@/lib/trench/cloud";
 import {
   connectWallet,
   disconnectWallet,
+  ensureEthHot,
   ensureHot,
   hotAutoArmed,
+  importEthHot,
   isLiveMint,
+  mintEthHot,
+  refreshEthHot,
   refreshHot,
   refreshWallet,
   setHotAuto,
@@ -107,8 +112,10 @@ function TrenchInner() {
   const extra = useTrench((s) => s.extra);
   const setHydrated = useTrench((s) => s.setHydrated);
   const cycle = useTrench((s) => s.cycle);
+  const tapeVenue = useTrench((s) => s.tapeVenue);
   const atHome = useTrench((s) => s.atHome);
   const [cloudRole, setCloudRole] = useState<"hunter" | "watch" | "off">("off");
+  const [cloudEyes, setCloudEyes] = useState(0);
   const hatchLive = !!rival && (rival.status === "alive" || rival.status === "survived");
   const cubLive = !!extra && (extra.status === "alive" || extra.status === "survived");
   const hunting =
@@ -124,16 +131,22 @@ function TrenchInner() {
   useEffect(() => {
     if (!deskPin()) {
       setCloudRole("off");
+      setCloudEyes(0);
       return;
     }
     let on = true;
     const beat = async () => {
-      const wasHunter = amHunter();
-      const role = await syncCloud(wasHunter);
-      if (!on) return;
-      setCloudRole(role);
-      if (role === "watch" || (!wasHunter && role === "hunter")) {
-        await useTrench.persist.rehydrate();
+      try {
+        const wasHunter = amHunter();
+        const role = await syncCloud(wasHunter);
+        if (!on) return;
+        setCloudRole(role);
+        setCloudEyes(chamberEyes());
+        if (role === "watch" || (!wasHunter && role === "hunter")) {
+          await useTrench.persist.rehydrate();
+        }
+      } catch {
+        if (on) setCloudRole(amHunter() ? "hunter" : "off");
       }
     };
     void beat();
@@ -154,22 +167,24 @@ function TrenchInner() {
 
   useEffect(() => {
     if (!hunting || cloudRole === "watch") return;
+    if (deskPin() && cloudRole !== "hunter") return;
     void cycle();
+    const ms = tapeVenue === "pons" ? CYCLE_PONS_MS : CYCLE_MS;
     const id = window.setInterval(() => {
       void cycle();
-    }, CYCLE_MS);
+    }, ms);
     return () => window.clearInterval(id);
-  }, [hunting, cycle, cloudRole]);
+  }, [hunting, cycle, cloudRole, tapeVenue]);
 
   if (!hydrated) {
     return <WakeScreen ready={false} />;
   }
 
   if (atHome || (status === "idle" && !hatchLive && !cubLive)) {
-    return <WakeScreen ready hunting={hunting && status !== "idle"} />;
+    return <WakeScreen ready hunting={hunting && status !== "idle"} eyes={cloudEyes} role={cloudRole} />;
   }
   if (status === "dead") return <DeathScreen />;
-  return <Desk cloudRole={cloudRole} />;
+  return <Desk cloudRole={cloudRole} eyes={cloudEyes} />;
 }
 
 function BookDock({ compact = false }: { compact?: boolean }) {
@@ -289,30 +304,45 @@ function WalletDock() {
   const [sign, setSign] = useState(signOneState);
   const [hotPk, setHotPk] = useState("");
   const [hotSol, setHotSol] = useState<number | null>(null);
+  const [ethPk, setEthPk] = useState("");
+  const [ethBal, setEthBal] = useState<number | null>(null);
+  const [ethSecret, setEthSecret] = useState("");
   const [hotAuto, setHotAutoUi] = useState(false);
 
   const storeHotSol = useTrench((s) => s.hotSol);
   const storeHotPk = useTrench((s) => s.hotPubkey);
+  const storeEth = useTrench((s) => s.hotEth);
+  const storeEthAddr = useTrench((s) => s.hotEthAddr);
+  const tapeVenue = useTrench((s) => s.tapeVenue);
 
   useEffect(() => {
     const h = ensureHot();
     setHotPk(storeHotPk || h.pubkey);
     setHotAutoUi(h.auto);
+    const e = ensureEthHot();
+    setEthPk(storeEthAddr || e.address);
     void refreshHot().then((s) => {
       setHotPk(s.pubkey);
       setHotSol(s.sol);
       setHotAutoUi(s.auto);
+    });
+    void refreshEthHot().then((s) => {
+      setEthPk(s.address);
+      setEthBal(s.eth);
     });
     void refreshWallet().then((s) => {
       setPubkey(s.pubkey);
       setSol(s.sol);
       setSign(signOneState());
     });
-  }, [storeHotPk]);
+  }, [storeHotPk, storeEthAddr]);
 
   useEffect(() => {
     if (storeHotSol != null) setHotSol(storeHotSol);
   }, [storeHotSol]);
+  useEffect(() => {
+    if (storeEth != null) setEthBal(storeEth);
+  }, [storeEth]);
 
   async function connect() {
     setBusy(true);
@@ -351,12 +381,44 @@ function WalletDock() {
     );
   }
 
+  function copyEth() {
+    if (!ethPk) return;
+    void navigator.clipboard.writeText(ethPk).then(
+      () => setMsg("ETH hot copied. send ~0.002 ETH on Robinhood Chain (4663). not your phantom."),
+      () => setMsg("highlight the ETH address and ctrl+c."),
+    );
+  }
+
+  function takeEthKey() {
+    const r = importEthHot(ethSecret);
+    if (!r.ok || !r.snap) {
+      setMsg(r.error ?? "key did not take.");
+      return;
+    }
+    setEthSecret("");
+    setEthPk(r.snap.address);
+    setMsg(`ETH hot restored ${r.snap.address.slice(0, 10)}… same wallet. fund if the old tab still holds the ETH.`);
+    void refreshEthHot().then((s) => {
+      setEthPk(s.address);
+      setEthBal(s.eth);
+      useTrench.setState({ hotEthAddr: s.address, hotEth: s.eth });
+    });
+  }
+
+  function mintEth() {
+    const s = mintEthHot();
+    setEthPk(s.address);
+    setMsg("new ETH hot minted. only do this if Firefox is gone and you have no key.");
+  }
+
   function toggleAuto() {
     const on = setHotAuto(!hotAuto);
     setHotAutoUi(on);
     setMsg(
       on
-        ? "HOT AUTO on. Hatch fills spend 0.02 SOL. no popup. telegram-bot rules."
+        ? tapeVenue === "pons"
+          ? "HOT AUTO on. Pons fills spend 0.001 ETH. SOL stays on pump."
+          : "HOT AUTO on. Hatch fills spend 0.02 SOL. no popup. telegram-bot rules."
         : "hot auto off.",
     );
   }
@@ -400,6 +462,42 @@ function WalletDock() {
           </Button>
         </>
       ) : null}
+      {ethPk ? (
+        <>
+          <input
+            id="trencher-eth-hot-addr"
+            readOnly
+            value={ethPk}
+            onFocus={(e) => e.currentTarget.select()}
+            spellCheck={false}
+            className="h-9 w-[14rem] border border-line bg-elevated px-2 font-mono text-2xs text-fg"
+            title={ethPk}
+          />
+          <Button size="sm" variant="ghost" onClick={copyEth}>
+            Copy ETH hot
+          </Button>
+          <span className="font-mono text-2xs text-muted">
+            {ethBal != null ? `${ethBal.toFixed(4)} ETH` : "…"}
+          </span>
+        </>
+      ) : null}
+      <input
+        value={ethSecret}
+        onChange={(e) => setEthSecret(e.target.value)}
+        placeholder="paste Firefox ETH key 0x…"
+        spellCheck={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+        className="h-9 w-[16rem] border border-line bg-elevated px-2 font-mono text-2xs text-fg placeholder:text-subtle"
+      />
+      <Button size="sm" variant="ghost" disabled={!ethSecret.trim()} onClick={takeEthKey}>
+        Restore ETH
+      </Button>
+      {!ethPk ? (
+        <Button size="sm" variant="ghost" onClick={mintEth}>
+          Mint new ETH
+        </Button>
+      ) : null}
       {sign === "armed" && !hotAuto ? (
         <span className="font-mono text-2xs text-subtle">sign-one still armed (popup)</span>
       ) : null}
@@ -408,28 +506,60 @@ function WalletDock() {
   );
 }
 
-function CloudDock() {
-  const [pin, setPin] = useState(deskPin);
+function CloudDock({
+  eyes = 0,
+  role = "off",
+}: {
+  eyes?: number;
+  role?: "hunter" | "watch" | "off";
+}) {
+  const [pin, setPin] = useState("");
   const [msg, setMsg] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [claimed, setClaimed] = useState(false);
+
+  useEffect(() => {
+    setPin(deskPin());
+  }, []);
+
+  useEffect(() => {
+    setClaimed(role === "hunter");
+  }, [role]);
 
   async function seat() {
     setBusy(true);
-    const text = await seatCloud(pin);
-    setBusy(false);
-    setMsg(text);
+    try {
+      const text = await seatCloud(pin);
+      setMsg(text);
+      const took = /cell taken|chamber live/i.test(text);
+      setClaimed(took);
+      if (took) window.setTimeout(() => window.location.reload(), 400);
+    } catch {
+      setMsg("chamber did not answer.");
+      setClaimed(false);
+    } finally {
+      setBusy(false);
+    }
   }
 
   async function unlock() {
     setBusy(true);
-    const text = await unlockCloud(pin);
-    setBusy(false);
-    setMsg(text);
-    window.setTimeout(() => window.location.reload(), 400);
+    try {
+      const text = await unlockCloud(pin);
+      setMsg(text);
+      setClaimed(/this tab is the hunter/i.test(text));
+      window.setTimeout(() => window.location.reload(), 400);
+    } catch {
+      setMsg("watch did not answer.");
+      setBusy(false);
+    }
   }
 
+  const ready = claimed || role === "hunter";
+  const elsewhere = !ready && role === "watch";
+
   return (
-    <div className="flex flex-wrap items-center gap-2">
+    <div className="flex flex-wrap items-start gap-2">
       <input
         value={pin}
         onChange={(e) => setPin(e.target.value)}
@@ -438,13 +568,29 @@ function CloudDock() {
         autoCapitalize="off"
         autoCorrect="off"
         className="h-9 w-36 border border-line bg-elevated px-2 font-mono text-2xs text-fg placeholder:text-subtle"
+        suppressHydrationWarning
       />
-      <Button size="sm" variant="ghost" disabled={busy} onClick={() => void seat()}>
-        Chamber #
-      </Button>
+      <div className="flex flex-col items-start gap-0.5">
+        <Button size="sm" variant="ghost" disabled={busy} onClick={() => void seat()}>
+          Chamber #
+        </Button>
+        <p
+          className={cn(
+            "font-mono text-[10px] leading-none tracking-label uppercase",
+            ready ? "text-warn" : elsewhere ? "text-loss" : "text-subtle",
+          )}
+        >
+          {ready ? "Cell room ready" : elsewhere ? "Cell held elsewhere" : "Cell room dark"}
+        </p>
+      </div>
       <Button size="sm" variant="ghost" disabled={busy} onClick={() => void unlock()}>
         Watch
       </Button>
+      {eyes > 0 ? (
+        <p className="font-mono text-2xs tabular-nums text-gain">
+          {eyes} watching
+        </p>
+      ) : null}
       {msg ? <p className="font-mono text-2xs text-subtle">{msg}</p> : null}
     </div>
   );
@@ -453,9 +599,13 @@ function CloudDock() {
 function WakeScreen({
   ready = true,
   hunting = false,
+  eyes = 0,
+  role = "off",
 }: {
   ready?: boolean;
   hunting?: boolean;
+  eyes?: number;
+  role?: "hunter" | "watch" | "off";
 }) {
   const arm = useTrench((s) => s.arm);
   const spectate = useTrench((s) => s.spectate);
@@ -464,7 +614,7 @@ function WakeScreen({
     <main className="relative flex min-h-dvh flex-col justify-between bg-bg px-5 py-8 sm:px-10 sm:py-12">
       <header className="flex items-center justify-between text-muted">
         <p className="font-mono text-2xs tracking-kicker uppercase">paper trench</p>
-        <p className="font-mono text-2xs tracking-label uppercase">live pump.fun tape</p>
+        <p className="font-mono text-2xs tracking-label uppercase">pump.fun · Pons paper</p>
       </header>
 
       <section className="mx-auto flex w-full max-w-xl flex-col gap-6 py-10">
@@ -477,8 +627,9 @@ function WakeScreen({
         <p className="stagger-in max-w-md text-base leading-snug text-muted text-pretty">
           Most of the desk is stopping. Every loser rewrites the playbook — Warden
           burns the wallet, Sniper raises the floor, Risk tightens the stop, never
-          widens it. Stake {formatUsd(STARTING_CASH, 0)}. Pay {formatUsd(RENT_USD, 0)} rent or get deleted.
-          If it dies, the next clone inherits the book. Cash does not.
+          widens it. Stake {formatUsd(STARTING_CASH, 0)}. The gate starts at {formatUsd(gateUsd(1), 0)}
+          and climbs each cell — Warden climbs with it. Pay the gate or get deleted.
+          Pump.fun is live SOL. Pons is live ETH on the V2 curve — 0.001 ETH cap. Fund the ETH hot.
         </p>
         <div className="stagger-in flex flex-col gap-3 sm:flex-row sm:items-center">
           {hunting ? (
@@ -507,7 +658,7 @@ function WakeScreen({
             </Button>
           ) : null}
           <BookDock />
-          <CloudDock />
+          <CloudDock eyes={eyes} role={role} />
           <p className="font-mono text-2xs leading-relaxed text-subtle">
             Second window is a blank cell. Do not stake. Load the book JSON from Downloads.
             The hunt, Hatch, and hot wallet live in the tab that was already running.
@@ -572,7 +723,13 @@ function DeathScreen() {
   );
 }
 
-function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" }) {
+function Desk({
+  cloudRole = "off",
+  eyes = 0,
+}: {
+  cloudRole?: "hunter" | "watch" | "off";
+  eyes?: number;
+}) {
   const vetCash = useTrench((s) => s.cash);
   const vetPositions = useTrench((s) => s.positions);
   const vetClosed = useTrench((s) => s.closed);
@@ -587,10 +744,12 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
   const houseBank = useTrench((s) => s.houseBank);
   const hotSol = useTrench((s) => s.hotSol);
   const hotPubkey = useTrench((s) => s.hotPubkey);
+  const hotEth = useTrench((s) => s.hotEth);
+  const hotEthAddr = useTrench((s) => s.hotEthAddr);
   const logs = useTrench((s) => s.logs);
   const lastHotLine = useTrench((s) => s.lastHotLine);
   const spiritFloor = useSpirit((s) => s.canon.scoreFloor);
-  const round = useTrench((s) => s.round);
+  const round = useTrench((s) => s.round) || 1;
   const roundStartedAt = useTrench((s) => s.roundStartedAt);
   const focus = useTrench((s) => s.focus);
   const spawnRival = useTrench((s) => s.spawnRival);
@@ -605,6 +764,9 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
   const payRent = useTrench((s) => s.payRent);
   const ticking = useTrench((s) => s.ticking);
   const tapeError = useTrench((s) => s.tapeError);
+  const tapeVenue = useTrench((s) => s.tapeVenue);
+  const setTapeVenue = useTrench((s) => s.setTapeVenue);
+  const due = gateUsd(round);
   const kills = useTrench((s) => s.kills);
   const house = useTrench((s) => s.house);
   const vetSign = useTrench((s) => s.callsign) || "BODY";
@@ -658,7 +820,7 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
   const focusCash = cubFocus ? extra?.cash ?? 0 : hatchFocus ? rival?.cash ?? 0 : vetCash;
   const focusSitting = cubFocus ? !!extra?.rentPaid : hatchFocus ? !!rival?.rentPaid : rentPaid;
   const focusHunting = cubFocus ? cubLive : hatchFocus ? hatchLive : vetLive;
-  const canPay = focusHunting && !focusSitting && focusCash >= RENT_USD;
+  const canPay = focusHunting && !focusSitting && focusCash >= due;
   const huntCount =
     (vetLive && !rentPaid ? 1 : 0) +
     (hatchLive && rival && !rival.rentPaid ? 1 : 0) +
@@ -700,6 +862,7 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
               TRENCHER
             </button>
             <StatusChip status={status} ticking={ticking} error={tapeError} />
+            <TapeSwitch venue={tapeVenue} onChange={setTapeVenue} />
             {status !== "watch" ? (
             <div className="flex items-center gap-1">
               <button
@@ -782,8 +945,8 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
               tone={(feesPaid ?? 0) > 0 ? "loss" : undefined}
             />
             <Stat
-              label="Rent"
-              value={rentPaid ? "paid" : formatUsd(RENT_USD, 0)}
+              label="Gate"
+              value={rentPaid ? "paid" : formatUsd(due, 0)}
               tone={rentPaid ? "gain" : "warn"}
             />
             <Stat label="Scanned" value={scanned.toLocaleString()} />
@@ -840,12 +1003,34 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
           </dl>
         </div>
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-gain/25 bg-gain/5 px-4 py-2 sm:px-6">
-          <p className="font-mono text-2xs tracking-label text-gain uppercase">real sol</p>
+          <p className="font-mono text-2xs tracking-label text-gain uppercase">
+            {tapeVenue === "pons" ? "real eth" : "real sol"}
+          </p>
           <dl className="flex flex-wrap items-center gap-x-5 gap-y-1 font-mono text-xs tabular-nums">
             <Stat
               label="Hot"
-              value={hotSol == null ? "—" : `${hotSol.toFixed(3)} SOL`}
-              tone={(hotSol ?? 0) >= 0.023 ? "gain" : (hotSol ?? 0) > 0 ? "warn" : undefined}
+              value={
+                tapeVenue === "pons"
+                  ? hotEth == null
+                    ? "—"
+                    : `${hotEth.toFixed(4)} ETH`
+                  : hotSol == null
+                    ? "—"
+                    : `${hotSol.toFixed(3)} SOL`
+              }
+              tone={
+                tapeVenue === "pons"
+                  ? (hotEth ?? 0) >= 0.0012
+                    ? "gain"
+                    : (hotEth ?? 0) > 0
+                      ? "warn"
+                      : undefined
+                  : (hotSol ?? 0) >= 0.023
+                    ? "gain"
+                    : (hotSol ?? 0) > 0
+                      ? "warn"
+                      : undefined
+              }
             />
             <Stat
               label="Auto"
@@ -858,7 +1043,15 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
             />
             <Stat
               label="Addr"
-              value={hotPubkey ? shortAddr(hotPubkey, 4) : "—"}
+              value={
+                tapeVenue === "pons"
+                  ? hotEthAddr
+                    ? shortAddr(hotEthAddr, 4)
+                    : "—"
+                  : hotPubkey
+                    ? shortAddr(hotPubkey, 4)
+                    : "—"
+              }
             />
             <Stat
               label="Last"
@@ -875,18 +1068,37 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
             />
             <Stat
               label="Cloud"
-              value={cloudRole === "off" ? "local" : cloudRole === "watch" ? "watching" : "hunting"}
-              tone={cloudRole === "hunter" ? "gain" : cloudRole === "watch" ? "warn" : undefined}
+              value={
+                cloudRole === "off"
+                  ? "local"
+                  : cloudRole === "watch"
+                    ? eyes
+                      ? `watching · ${eyes}`
+                      : "watching"
+                    : eyes
+                      ? `hunting · ${eyes}`
+                      : "hunting"
+              }
+              tone={
+                cloudRole === "hunter"
+                  ? "gain"
+                  : cloudRole === "watch"
+                    ? "warn"
+                    : undefined
+              }
             />
           </dl>
           <p className="font-mono text-2xs text-subtle">
-            Cash, bank, rent, PnL are paper. Only this row spends SOL.
+            {tapeVenue === "pons"
+              ? "Cash, bank, the gate, PnL are paper. This row spends 0.001 ETH on the Pons curve. SOL stays on pump."
+              : "Cash, bank, the gate, PnL are paper. Only this row spends SOL."}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2 border-t border-line px-4 py-2 sm:px-6">
           <p className="mr-auto font-mono text-2xs tracking-wide text-muted">
             thesis · {meta.thesis}
             {meta.source === "grok" ? " · grok" : meta.source === "local" ? " · local" : ""}
+            {` · cell ${round} · gate ${due}`}
             {" · "}floor {playbook.scoreFloor}
             {" · "}stop {(playbook.stopPct * 100).toFixed(0)}%
             {" · "}trail +{(TRAIL_ARM * 100).toFixed(0)}%/−{(TRAIL_GIVE * 100).toFixed(0)}% peak
@@ -896,7 +1108,7 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
           </p>
           <BookDock compact />
           <NtfyDock />
-          <CloudDock />
+          <CloudDock eyes={eyes} role={cloudRole} />
           <WalletDock />
           {status !== "watch" && !cellFull && (vetLive || hatchLive || cubLive) ? (
             <Button size="sm" variant="ghost" onClick={() => spawnRival()}>
@@ -916,7 +1128,7 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
           >
             {focusSitting
               ? `${focusSign} sitting`
-              : `Pay ${focusSign} ${formatUsd(RENT_USD, 0)}`}
+              : `Pay ${focusSign} the gate ${formatUsd(due, 0)}`}
           </Button>
         </div>
       </header>
@@ -941,6 +1153,32 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
   );
 }
 
+function TapeSwitch({
+  venue,
+  onChange,
+}: {
+  venue: "pump" | "pons";
+  onChange: (v: "pump" | "pons") => void;
+}) {
+  return (
+    <div className="flex items-center gap-1">
+      {(["pump", "pons"] as const).map((v) => (
+        <button
+          key={v}
+          type="button"
+          onClick={() => onChange(v)}
+          className={cn(
+            "border px-2 py-1 font-mono text-2xs tracking-label uppercase",
+            venue === v ? "border-fg text-fg" : "border-line text-muted hover:text-fg",
+          )}
+        >
+          {v === "pump" ? "pump" : "pons"}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function StatusChip({
   status,
   ticking,
@@ -955,7 +1193,7 @@ function StatusChip({
     : status === "watch"
       ? "spectating"
       : status === "survived"
-        ? "rent paid"
+        ? "through the gate"
         : ticking
           ? "cycling"
           : "live";
@@ -1213,10 +1451,13 @@ function PositionRow({
 function Tape() {
   const tape = useTrench((s) => s.tape);
   const seen = useTrench((s) => s.seen);
+  const venue = useTrench((s) => s.tapeVenue);
   const seenSet = useMemo(() => new Set(seen), [seen]);
   return (
     <section className="border-t border-line px-4 py-4 sm:px-5">
-      <h2 className="font-mono text-2xs tracking-kicker text-muted uppercase">Tape</h2>
+      <h2 className="font-mono text-2xs tracking-kicker text-muted uppercase">
+        Tape · {venue === "pons" ? "Pons V2 curve" : "pump.fun"}
+      </h2>
       {tape.length === 0 ? (
         <p className="mt-3 text-sm text-muted">Scout has not returned yet.</p>
       ) : (
@@ -1233,6 +1474,7 @@ function Tape() {
                 </div>
                 <p className="truncate font-mono text-micro text-subtle">
                   {ageLabel(c.createdAt)} · {shortAddr(c.creator)}
+                  {venue === "pons" ? " · pons" : ""}
                   {seenSet.has(c.mint) ? " · seen" : ""}
                 </p>
               </div>

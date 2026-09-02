@@ -1,5 +1,7 @@
 import { Keypair, VersionedTransaction } from "@solana/web3.js";
-import { buildLiveTrade, fetchHotBalance, sendSignedTx } from "./server";
+import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
+import { buildLiveTrade, buildPonsTrade, fetchEthBalance, fetchHotBalance, sendSignedEthTx, sendSignedTx } from "./server";
+import { isEvmMint } from "./types";
 
 const KEY = "trencher-wallet-v1";
 const SIGN_KEY = "trencher-sign-one";
@@ -8,6 +10,8 @@ const HOT_ARM = "trencher-hot-auto";
 const LIVE_MINTS = "trencher-live-mints";
 
 export const LIVE_CAP_SOL = 0.02;
+export const LIVE_CAP_ETH = 0.001;
+const ETH_KEY = "trencher-eth-hot-v1";
 
 export function markLiveMint(mint: string) {
   if (!mint) return;
@@ -341,5 +345,158 @@ export async function hotSell(mint: string, symbol: string): Promise<{ ok: boole
     };
   } catch (e) {
     return { ok: false, text: e instanceof Error ? e.message : "hot sell failed." };
+  }
+}
+
+export type EthHotSnap = {
+  address: string;
+  eth: number | null;
+  auto: boolean;
+};
+
+function loadEthPk(): `0x${string}` | null {
+  try {
+    const raw = localStorage.getItem(ETH_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as { secret?: string };
+    if (!parsed.secret || !parsed.secret.startsWith("0x")) return null;
+    return parsed.secret as `0x${string}`;
+  } catch {
+    return null;
+  }
+}
+
+function writeEthPk(pk: `0x${string}`): EthHotSnap {
+  const acct = privateKeyToAccount(pk);
+  try {
+    localStorage.setItem(ETH_KEY, JSON.stringify({ secret: pk, address: acct.address }));
+  } catch {
+    /* ignore */
+  }
+  return { address: acct.address, eth: null, auto: hotAutoArmed() };
+}
+
+export function peekEthHot(): EthHotSnap {
+  const pk = loadEthPk();
+  if (!pk) return { address: "", eth: null, auto: hotAutoArmed() };
+  const acct = privateKeyToAccount(pk);
+  return { address: acct.address, eth: null, auto: hotAutoArmed() };
+}
+
+export function ensureEthHot(): EthHotSnap {
+  return peekEthHot();
+}
+
+export function mintEthHot(): EthHotSnap {
+  const existing = peekEthHot();
+  if (existing.address) return existing;
+  return writeEthPk(generatePrivateKey());
+}
+
+export function importEthHot(secret: string): { ok: boolean; snap?: EthHotSnap; error?: string } {
+  const raw = secret.trim();
+  const pk = (raw.startsWith("0x") ? raw : `0x${raw}`) as `0x${string}`;
+  if (!/^0x[0-9a-fA-F]{64}$/.test(pk)) {
+    return { ok: false, error: "not a 32-byte hex key." };
+  }
+  try {
+    return { ok: true, snap: writeEthPk(pk) };
+  } catch {
+    return { ok: false, error: "that key would not load." };
+  }
+}
+
+export async function refreshEthHot(): Promise<EthHotSnap> {
+  const hot = peekEthHot();
+  if (!hot.address) return hot;
+  try {
+    const r = await fetchEthBalance({ data: { address: hot.address } });
+    hot.eth = r.ok ? r.eth : null;
+  } catch {
+    hot.eth = null;
+  }
+  hot.auto = hotAutoArmed();
+  return hot;
+}
+
+async function signAndSendEthSteps(
+  steps: {
+    to: string;
+    data: string;
+    value: string;
+    gas: string;
+    gasPrice: string;
+    nonce: number;
+    chainId: number;
+  }[],
+): Promise<{ ok: boolean; hash?: string; error?: string }> {
+  const pk = loadEthPk();
+  if (!pk) return { ok: false, error: "no eth hot." };
+  const account = privateKeyToAccount(pk);
+  let last = "";
+  for (const step of steps) {
+    const signed = await account.signTransaction({
+      to: step.to as `0x${string}`,
+      data: step.data as `0x${string}`,
+      value: BigInt(step.value),
+      gas: BigInt(step.gas),
+      gasPrice: BigInt(step.gasPrice),
+      nonce: step.nonce,
+      chainId: step.chainId,
+      type: "legacy",
+    });
+    const sent = await sendSignedEthTx({ data: { raw: signed } });
+    if (!sent.ok || !sent.hash) return { ok: false, error: sent.error || "eth send failed" };
+    last = sent.hash;
+  }
+  return { ok: true, hash: last };
+}
+
+export async function ethHotBuy(mint: string, symbol: string): Promise<{ ok: boolean; text: string }> {
+  if (!hotAutoArmed()) return { ok: false, text: "hot auto is off." };
+  if (!isEvmMint(mint)) return { ok: false, text: "not a pons mint." };
+  const hot = peekEthHot();
+  if (!hot.address) return { ok: false, text: "no ETH hot. paste the Firefox key or mint one." };
+  let eth = 0;
+  try {
+    const r = await fetchEthBalance({ data: { address: hot.address } });
+    eth = r.eth ?? 0;
+  } catch {
+    return { ok: false, text: "could not read ETH hot." };
+  }
+  if (eth < LIVE_CAP_ETH + 0.0002) {
+    return { ok: false, text: `ETH hot has ${eth.toFixed(4)} ETH. send at least 0.002. auto skipped.` };
+  }
+  const built = await buildPonsTrade({ data: { from: hot.address, mint, action: "buy" } });
+  if (!built.ok) return { ok: false, text: `pons: ${built.error}` };
+  try {
+    const sent = await signAndSendEthSteps(built.steps);
+    if (!sent.ok || !sent.hash) return { ok: false, text: `ETH send failed: ${sent.error}` };
+    markLiveMint(mint);
+    return {
+      ok: true,
+      text: `HOT · 0.001 ETH $${symbol} · ${sent.hash.slice(0, 10)}… https://robinhoodchain.blockscout.com/tx/${sent.hash}`,
+    };
+  } catch (e) {
+    return { ok: false, text: e instanceof Error ? e.message : "eth hot send failed." };
+  }
+}
+
+export async function ethHotSell(mint: string, symbol: string): Promise<{ ok: boolean; text: string }> {
+  if (!hotAutoArmed()) return { ok: false, text: "hot auto is off." };
+  if (!isEvmMint(mint)) return { ok: false, text: "not a pons mint." };
+  const hot = peekEthHot();
+  if (!hot.address) return { ok: false, text: "no ETH hot." };
+  const built = await buildPonsTrade({ data: { from: hot.address, mint, action: "sell" } });
+  if (!built.ok) return { ok: false, text: `pons sell: ${built.error}` };
+  try {
+    const sent = await signAndSendEthSteps(built.steps);
+    if (!sent.ok || !sent.hash) return { ok: false, text: `ETH sell failed: ${sent.error}` };
+    return {
+      ok: true,
+      text: `HOT SELL · 100% $${symbol} · ${sent.hash.slice(0, 10)}… https://robinhoodchain.blockscout.com/tx/${sent.hash}`,
+    };
+  } catch (e) {
+    return { ok: false, text: e instanceof Error ? e.message : "eth hot sell failed." };
   }
 }

@@ -1,4 +1,4 @@
-import { FEE_RATE, FLAT_AFTER_MS, GRADE_AFTER_MS, MAX_BUY_SOL, SCORE_FLOOR, STOP_LOSS, TAKE_PROFIT, TRAIL_ARM, TRAIL_GIVE } from "./types";
+import { cellHeat, FEE_RATE, FLAT_AFTER_MS, GRADE_AFTER_MS, MAX_BUY_SOL, SCORE_FLOOR, STOP_LOSS, TAKE_PROFIT, TRAIL_ARM, TRAIL_GIVE } from "./types";
 import type { ClosedTrade, KillGrade, KillKind, KillRecord, LaneId, Lesson, MetaState, Playbook, PumpCoin, SellReason } from "./types";
 
 export const CLUSTERS: Record<string, string[]> = {
@@ -40,9 +40,34 @@ export function blankPlaybook(): Playbook {
   };
 }
 
+export function climbPlaybook(book: Playbook): Playbook {
+  const stop =
+    book.stopPct < 0 ? Math.min(-0.35, book.stopPct + 0.02) : book.stopPct;
+  return {
+    ...book,
+    scoreFloor: Math.min(78, book.scoreFloor + 3),
+    stopPct: stop,
+    bannedCreators: [...book.bannedCreators],
+  };
+}
+
+export function heatPlaybook(book: Playbook, round: number, shift = 0): Playbook {
+  const heat = cellHeat(round);
+  const stop =
+    book.stopPct < 0 ? Math.min(-0.35, book.stopPct + Math.min(0.15, heat * 0.01)) : book.stopPct;
+  return {
+    ...book,
+    scoreFloor: Math.min(78, Math.max(32, book.scoreFloor + heat + shift)),
+    stopPct: stop,
+    bannedCreators: [...book.bannedCreators],
+  };
+}
+
 export function cheapKill(coin: PumpCoin, now: number): string | null {
   if (coin.banned || coin.nsfw) return "banned or flagged. not touching it.";
-  if (coin.complete) return "already off the curve. too late.";
+  if (coin.complete) {
+    return coin.venue === "pons" ? "already off the curve. missed." : "already off the curve. too late.";
+  }
   if (!coin.symbol.trim() || coin.symbol.length > 14) return "ticker is garbage.";
   if (coin.name.trim().length < 2) return "nameless. skip.";
   const age = now - coin.createdAt;

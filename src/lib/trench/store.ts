@@ -4,6 +4,7 @@ import {
   fetchCreator,
   fetchQuotes,
   fetchTape,
+  fetchPonsTape,
   consultMeta,
 } from "./server";
 import {
@@ -11,9 +12,11 @@ import {
   absorbTrade,
   blankPlaybook,
   cheapKill,
+  climbPlaybook,
   decideGrade,
   decideSell,
   detectMeta,
+  heatPlaybook,
   makeKill,
   masteryOf,
   paperFee,
@@ -30,7 +33,7 @@ import {
 } from "./logic";
 import { ntfyHeartbeat, pingNtfy } from "./ntfy";
 import { amHunter, deskPin, syncCloud } from "./cloud";
-import { LIVE_CAP_SOL, hotAutoArmed, hotBuy, hotSell, isLiveMint, refreshHot, shadowQuote, signOneBuy, signOneState } from "./wallet";
+import { LIVE_CAP_SOL, ethHotBuy, ethHotSell, hotAutoArmed, hotBuy, hotSell, isLiveMint, refreshEthHot, refreshHot, shadowQuote, signOneBuy, signOneState } from "./wallet";
 import { canonHasBlood, canonToPlaybook } from "./canon";
 import { useSpirit } from "./spirit";
 import {
@@ -38,12 +41,12 @@ import {
   BROKE_USD,
   BUY_COOLDOWN_MS,
   MAX_POSITIONS,
-  RENT_USD,
   ROUND_MS,
   SCORE_FLOOR,
   STARTING_CASH,
   TRAIL_ARM,
   TRAIL_GIVE,
+  gateUsd,
   type AgentId,
   type AgentPulse,
   type BotStatus,
@@ -63,8 +66,12 @@ import {
   type Rival,
   type LaneId,
   type SellReason,
+  type TapeVenue,
+  isEvmMint,
   mintCallsign,
 } from "./types";
+
+let lastPonsQuietAt = 0;
 
 type TrenchState = {
   hydrated: boolean;
@@ -78,6 +85,7 @@ type TrenchState = {
   lastCycleAt: number;
   ticking: boolean;
   tapeError: string | null;
+  tapeVenue: TapeVenue;
   scanned: number;
   killed: number;
   seen: string[];
@@ -106,11 +114,14 @@ type TrenchState = {
   round: number;
   hotPubkey: string | null;
   hotSol: number | null;
+  hotEthAddr: string | null;
+  hotEth: number | null;
   lastHotLine: string | null;
   atHome: boolean;
   callsign: string;
   goHome: () => void;
   leaveHome: () => void;
+  setTapeVenue: (venue: TapeVenue) => void;
   spawnRival: () => void;
   cull: () => void;
   setFocus: (lane: LaneId) => void;
@@ -159,7 +170,7 @@ function blankHouse(): House {
 
 function initial(): Omit<
   TrenchState,
-  "setHydrated" | "arm" | "clone" | "payRent" | "cycle" | "askMeta" | "readLosers" | "snapshotBook" | "ingestBook" | "spawnRival" | "cull" | "setFocus" | "spectate" | "goHome" | "leaveHome"
+  "setHydrated" | "arm" | "clone" | "payRent" | "cycle" | "askMeta" | "readLosers" | "snapshotBook" | "ingestBook" | "spawnRival" | "cull" | "setFocus" | "spectate" | "goHome" | "leaveHome" | "setTapeVenue"
 > {
   return {
     hydrated: false,
@@ -173,6 +184,7 @@ function initial(): Omit<
     lastCycleAt: 0,
     ticking: false,
     tapeError: null,
+    tapeVenue: "pump",
     scanned: 0,
     killed: 0,
     seen: [],
@@ -201,6 +213,8 @@ function initial(): Omit<
     round: 1,
     hotPubkey: null,
     hotSol: null,
+    hotEthAddr: null,
+    hotEth: null,
     lastHotLine: null,
     atHome: false,
     callsign: "",
@@ -397,6 +411,32 @@ export const useTrench = create<TrenchState>()(
       }
 
       function fireLive(lane: LaneId, mint: string, symbol: string, score: number) {
+        if (isEvmMint(mint) || get().tapeVenue === "pons") {
+          if (!hotAutoArmed()) return;
+          if (captain() !== lane) return;
+          const spiritFloor = Math.max(
+            SCORE_FLOOR,
+            useSpirit.getState().canon?.scoreFloor ?? SCORE_FLOOR,
+          );
+          if (score < spiritFloor) {
+            log(
+              "TILL",
+              "sys",
+              `SPIRIT veto live ETH $${symbol} score ${score} vs canon floor ${spiritFloor}. paper only. ${signOf(lane)} holds the wallet.`,
+              { mint, symbol },
+            );
+            return;
+          }
+          void ethHotBuy(mint, symbol).then((r) => {
+            log("TILL", r.ok ? "till" : "sys", r.text, { mint, symbol });
+            set({ lastHotLine: r.text });
+            if (r.ok) {
+              pingNtfy("TRENCHER", `HOT 0.001 ETH $${symbol} · ${signOf(lane)}`, true);
+              markLaneLive(lane, mint);
+            }
+          });
+          return;
+        }
         if (!hotAutoArmed() && signOneState() !== "armed") return;
         if (captain() !== lane) return;
         const spiritFloor = Math.max(
@@ -437,6 +477,14 @@ export const useTrench = create<TrenchState>()(
         if (!(p.live || isLiveMint(p.mint))) return;
         const mint = p.mint;
         const symbol = p.symbol;
+        if (isEvmMint(mint)) {
+          void ethHotSell(mint, symbol).then((r) => {
+            log("TILL", r.ok ? "till" : "sys", r.text, { mint, symbol });
+            set({ lastHotLine: r.text });
+            if (r.ok) pingNtfy("TRENCHER", `HOT ETH SELL $${symbol}`, true);
+          });
+          return;
+        }
         void hotSell(mint, symbol).then((r) => {
           log("TILL", r.ok ? "till" : "sys", r.text, { mint, symbol });
           set({ lastHotLine: r.text });
@@ -468,13 +516,10 @@ export const useTrench = create<TrenchState>()(
         return out;
       }
 
-      function spiritBody(floorShift = 0, taken: string[] = []): Rival {
+      function spiritBody(floorShift = 0, taken: string[] = [], cell = 1): Rival {
         const spirit = useSpirit.getState().canon;
         const book = canonHasBlood(spirit) ? canonToPlaybook(spirit) : blankPlaybook();
-        const floor = Math.max(
-          SCORE_FLOOR,
-          Math.min(78, (book.scoreFloor ?? SCORE_FLOOR) + floorShift),
-        );
+        const heated = heatPlaybook(book, cell, floorShift);
         return {
           status: "alive",
           cash: STARTING_CASH,
@@ -484,7 +529,7 @@ export const useTrench = create<TrenchState>()(
           lastBuyAt: 0,
           positions: [],
           closed: [],
-          playbook: { ...book, bannedCreators: [...book.bannedCreators], scoreFloor: floor },
+          playbook: heated,
           lessons: (spirit.lessons ?? []).slice(0, 12),
           feesPaid: 0,
           killed: 0,
@@ -555,7 +600,7 @@ export const useTrench = create<TrenchState>()(
               cash,
               positions,
               closed,
-              playbook: { ...playbook, bannedCreators: [...playbook.bannedCreators] },
+              playbook: climbPlaybook(playbook),
               lessons,
               feesPaid,
               lastBuyAt,
@@ -583,10 +628,12 @@ export const useTrench = create<TrenchState>()(
           const hatchSnap = list[1];
           const cubSnap = list[2];
           const kept = list.map((x) => x.callsign);
-          const hatchBody = hatchSnap ? toRival(hatchSnap) : spiritBody(-10, kept);
-          const cubBody = cubSnap ? toRival(cubSnap) : spiritBody(-22, [...kept, hatchBody.callsign]);
+          const nextCell = (s.round ?? 1) + 1;
+          const due = gateUsd(nextCell);
+          const hatchBody = hatchSnap ? toRival(hatchSnap) : spiritBody(-6, kept, nextCell);
+          const cubBody = cubSnap ? toRival(cubSnap) : spiritBody(-12, [...kept, hatchBody.callsign], nextCell);
           const vetCash = champ?.cash ?? STARTING_CASH;
-          const vetPlay = champ?.playbook ?? s.playbook;
+          const vetPlay = champ?.playbook ?? climbPlaybook(s.playbook);
           const vetSign = champ?.callsign || mintCallsign([hatchBody.callsign, cubBody.callsign]);
           set({
             status: "alive",
@@ -606,7 +653,7 @@ export const useTrench = create<TrenchState>()(
             focus: "vet",
             housePot: 0,
             roundStartedAt: now,
-            round: (s.round ?? 1) + 1,
+            round: nextCell,
             house: {
               ...(s.house ?? blankHouse()),
               playbook: vetPlay,
@@ -620,10 +667,10 @@ export const useTrench = create<TrenchState>()(
           log(
             "META",
             "sys",
-            `round ${(s.round ?? 1) + 1}. ${names}. resters came back. pit winner took the pot ${pot.toFixed(2)}. bank ${(s.houseBank ?? 0).toFixed(0)}.`,
+            `cell ${nextCell}. the gate is ${due}. Warden floor ${vetPlay.scoreFloor}. ${names}. pit winner took the pot ${pot.toFixed(2)}. bank ${(s.houseBank ?? 0).toFixed(0)}.`,
           );
-          log("TILL", "till", "rent sitters hunt again. new blood at 50 if a chair was empty.");
-          pingNtfy("TRENCHER", `round ${(s.round ?? 1) + 1}. ${names}`, true);
+          log("TILL", "till", `the gate climbs. sitters hunt again. new blood at 50 if a chair was empty.`);
+          pingNtfy("TRENCHER", `cell ${nextCell}. gate $${due}. ${names}`, true);
         } finally {
           crowning = false;
         }
@@ -652,10 +699,17 @@ export const useTrench = create<TrenchState>()(
             nextRound(null);
             return;
           }
+          const nextCell = (s.round ?? 1) + 1;
           const now2 = Date.now();
           const a = mintCallsign();
-          const b = spiritBody(-10, [a]);
-          const c = spiritBody(-22, [a, b.callsign]);
+          const b = spiritBody(-6, [a], nextCell);
+          const c = spiritBody(-12, [a, b.callsign], nextCell);
+          const book = heatPlaybook(
+            canonHasBlood(useSpirit.getState().canon)
+              ? canonToPlaybook(useSpirit.getState().canon)
+              : s.playbook,
+            nextCell,
+          );
           set({
             status: "alive",
             vetDead: false,
@@ -666,16 +720,18 @@ export const useTrench = create<TrenchState>()(
             lastBuyAt: 0,
             diedAt: null,
             callsign: a,
-            playbook: canonHasBlood(useSpirit.getState().canon)
-              ? canonToPlaybook(useSpirit.getState().canon)
-              : s.playbook,
+            playbook: book,
             rival: b,
             extra: c,
             focus: "vet",
             roundStartedAt: now2,
-            round: (s.round ?? 1) + 1,
+            round: nextCell,
           });
-          log("META", "sys", `cell empty. ${a} · ${b.callsign} · ${c.callsign}. three new $50. pot stays for the next champion.`);
+          log(
+            "META",
+            "sys",
+            `cell empty. ${a} · ${b.callsign} · ${c.callsign}. three new $50. the gate is ${gateUsd(nextCell)}. floor ${book.scoreFloor}.`,
+          );
           return;
         }
         const start = s.roundStartedAt ?? s.startedAt;
@@ -699,6 +755,7 @@ export const useTrench = create<TrenchState>()(
       function maybeAutoBrain() {
         const s = get();
         if (s.status === "watch" || s.status === "idle" || s.grokBusy) return;
+        if (!s.tape.length) return;
         const now = Date.now();
         if (now - (s.grokLastAt || 0) < 8 * 60_000) return;
         const losses = [
@@ -862,7 +919,7 @@ export const useTrench = create<TrenchState>()(
         if (s.status === "watch" || s.status === "idle") return;
         if (hunters().length < 2) return;
         if (s.vetDead || s.status === "dead") {
-          const b = spiritBody(-10, takenSigns());
+          const b = spiritBody(-6, takenSigns(), s.round || 1);
           set({
             vetDead: false,
             status: "alive",
@@ -890,7 +947,7 @@ export const useTrench = create<TrenchState>()(
           return;
         }
         if (!hatchOn(s.rival)) {
-          const b = spiritBody(-10, takenSigns());
+          const b = spiritBody(-6, takenSigns(), s.round || 1);
           set({ rival: b, focus: "hatch" });
           log(
             "META",
@@ -902,7 +959,7 @@ export const useTrench = create<TrenchState>()(
           return;
         }
         if (!liveBody(s.extra)) {
-          const b = spiritBody(-22, takenSigns());
+          const b = spiritBody(-12, takenSigns(), s.round || 1);
           set({ extra: b, focus: "cub" });
           log(
             "META",
@@ -981,6 +1038,27 @@ export const useTrench = create<TrenchState>()(
         goHome: () => set({ atHome: true }),
         leaveHome: () => set({ atHome: false }),
 
+        setTapeVenue: (venue) => {
+          const next = venue === "pons" ? "pons" : "pump";
+          if (get().tapeVenue === next) return;
+          set({
+            tapeVenue: next,
+            tape: [],
+            tapeError: null,
+            seen:
+              next === "pons"
+                ? get().seen.filter((m) => !isEvmMint(m))
+                : get().seen,
+          });
+          log(
+            "SCOUT",
+            "sys",
+            next === "pons"
+              ? "tape flipped to Pons on Robinhood Chain. paper ETH. SOL hot parked."
+              : "tape flipped to pump.fun. SOL hot is live again.",
+          );
+        },
+
         arm: () => {
           const now = Date.now();
           const prev = { ...blankHouse(), ...(get().house ?? {}) };
@@ -1053,7 +1131,7 @@ export const useTrench = create<TrenchState>()(
             log("WARDEN", "sys", "my no beats every score. wallets that dump us get burned.");
           }
           log("RISK", "sys", "no entry without a written exit. stops only tighten.");
-          log("TILL", "till", `${get().callsign || "body"} · staked ${STARTING_CASH.toFixed(0)} usd. rent is ${RENT_USD}. balance hits zero, this clone is deleted.`);
+          log("TILL", "till", `${get().callsign || "body"} · staked ${STARTING_CASH.toFixed(0)} usd. the gate is ${gateUsd(1)}. balance hits zero, this clone is deleted.`);
         },
 
         clone: () => {
@@ -1106,7 +1184,7 @@ export const useTrench = create<TrenchState>()(
             return;
           }
           if (!hatchLive) {
-            const hatch = blankHatch(burns, takenSigns());
+            const hatch = spiritBody(-6, takenSigns(), s.round || 1);
             set({ rival: hatch, focus: "hatch" });
             log(
               "META",
@@ -1117,7 +1195,7 @@ export const useTrench = create<TrenchState>()(
             return;
           }
           if (!cubLive) {
-            const cub = blankHatch(burns, takenSigns());
+            const cub = spiritBody(-12, takenSigns(), s.round || 1);
             set({ extra: cub, focus: "cub" });
             log(
               "META",
@@ -1157,53 +1235,54 @@ export const useTrench = create<TrenchState>()(
         payRent: () => {
           const s = get();
           if (s.status === "watch" || s.status === "idle") return;
+          const due = gateUsd(s.round ?? 1);
           const bank = (n: number) => (get().houseBank ?? 0) + n;
           const order: LaneId[] = s.focus === "hatch" || s.focus === "cub" ? [s.focus, "vet", "hatch", "cub"] : ["vet", "hatch", "cub"];
           const seen = new Set<LaneId>();
           for (const id of order) {
             if (seen.has(id)) continue;
             seen.add(id);
-            if (id === "vet" && !s.vetDead && !s.rentPaid && (s.status === "alive" || s.status === "survived") && s.cash >= RENT_USD) {
+            if (id === "vet" && !s.vetDead && !s.rentPaid && (s.status === "alive" || s.status === "survived") && s.cash >= due) {
               set({
-                cash: s.cash - RENT_USD,
+                cash: s.cash - due,
                 rentPaid: true,
                 status: "survived",
-                houseBank: bank(RENT_USD),
+                houseBank: bank(due),
                 house: { ...(s.house ?? blankHouse()), escapes: (s.house?.escapes ?? 0) + 1 },
               });
               log(
                 "TILL",
                 "till",
-                `${vetTag()} paid ${RENT_USD} into the house bank. sitting this pit. leftover stack stays. others still hunt.`,
+                `${vetTag()} paid the gate ${due}. cell ${s.round ?? 1}. sitting this pit. leftover stack stays. others still hunt.`,
               );
-              pingNtfy("TRENCHER", `${vetTag()} paid rent. bank $${bank(RENT_USD).toFixed(0)}. pit continues.`, true);
+              pingNtfy("TRENCHER", `${vetTag()} paid the gate $${due}. bank $${bank(due).toFixed(0)}.`, true);
               maybeCrown();
               return;
             }
-            if (id === "hatch" && hatchOn(s.rival) && s.rival && !s.rival.rentPaid && s.rival.cash >= RENT_USD) {
+            if (id === "hatch" && hatchOn(s.rival) && s.rival && !s.rival.rentPaid && s.rival.cash >= due) {
               set({
-                rival: { ...s.rival, cash: s.rival.cash - RENT_USD, rentPaid: true },
-                houseBank: bank(RENT_USD),
+                rival: { ...s.rival, cash: s.rival.cash - due, rentPaid: true },
+                houseBank: bank(due),
                 house: { ...(s.house ?? blankHouse()), escapes: (s.house?.escapes ?? 0) + 1 },
               });
-              log("TILL", "till", `${hatchTag()} paid ${RENT_USD} into the bank. sitting. others hunt.`);
-              pingNtfy("TRENCHER", `${hatchTag()} paid rent.`, true);
+              log("TILL", "till", `${hatchTag()} paid the gate ${due}. sitting. others hunt.`);
+              pingNtfy("TRENCHER", `${hatchTag()} paid the gate $${due}.`, true);
               maybeCrown();
               return;
             }
-            if (id === "cub" && liveBody(s.extra) && s.extra && !s.extra.rentPaid && s.extra.cash >= RENT_USD) {
+            if (id === "cub" && liveBody(s.extra) && s.extra && !s.extra.rentPaid && s.extra.cash >= due) {
               set({
-                extra: { ...s.extra, cash: s.extra.cash - RENT_USD, rentPaid: true },
-                houseBank: bank(RENT_USD),
+                extra: { ...s.extra, cash: s.extra.cash - due, rentPaid: true },
+                houseBank: bank(due),
                 house: { ...(s.house ?? blankHouse()), escapes: (s.house?.escapes ?? 0) + 1 },
               });
-              log("TILL", "till", `${cubTag()} paid ${RENT_USD} into the bank. sitting. others hunt.`);
-              pingNtfy("TRENCHER", `${cubTag()} paid rent.`, true);
+              log("TILL", "till", `${cubTag()} paid the gate ${due}. sitting. others hunt.`);
+              pingNtfy("TRENCHER", `${cubTag()} paid the gate $${due}.`, true);
               maybeCrown();
               return;
             }
           }
-          log("TILL", "till", "focused body needs 300 cash. flatten a bag first.");
+          log("TILL", "till", `focused body needs ${due} cash for the gate. flatten a bag first.`);
         },
 
         cycle: async () => {
@@ -1248,7 +1327,7 @@ export const useTrench = create<TrenchState>()(
           if (
             s0.tapeError &&
             s0.tapeError.includes("429") &&
-            Date.now() - s0.lastCycleAt < 25_000
+            Date.now() - s0.lastCycleAt < (s0.tapeVenue === "pons" ? 12_000 : 45_000)
           ) {
             applyGrades(s0.tape, {}, Date.now());
             return;
@@ -1262,7 +1341,14 @@ export const useTrench = create<TrenchState>()(
                 log("TILL", "till", `hot wallet ${h.sol.toFixed(3)} SOL.`);
               }
             });
-            const tape = await fetchTape();
+            void refreshEthHot().then((h) => {
+              const prev = get().hotEth;
+              set({ hotEthAddr: h.address, hotEth: h.eth });
+              if (h.eth != null && prev != null && Math.abs(h.eth - prev) >= 0.0001) {
+                log("TILL", "till", `ETH hot ${h.eth.toFixed(4)} ETH.`);
+              }
+            });
+            const tape = get().tapeVenue === "pons" ? await fetchPonsTape() : await fetchTape();
             if (!tape.ok) {
               set({ tapeError: tape.error, lastCycleAt: Date.now() });
               log("SCOUT", "sys", `tape is dark (${tape.error}).`);
@@ -1289,13 +1375,18 @@ export const useTrench = create<TrenchState>()(
                 "scan",
                 `${fresh.length} new launch${fresh.length === 1 ? "" : "es"} on the wire. not sizing.`,
               );
+            } else if (get().tapeVenue === "pons" && !tape.newest.length) {
+              if (Date.now() - lastPonsQuietAt > 60_000) {
+                lastPonsQuietAt = Date.now();
+                log("SCOUT", "sys", "pons wire is quiet. waiting on new 1% pools.");
+              }
             }
 
             set((s) => ({ scanned: s.scanned + fresh.length }));
 
             const creatorLocal = { ...get().creatorSeen };
             for (const c of fresh) {
-              creatorLocal[c.creator] = (creatorLocal[c.creator] ?? 0) + 1;
+              if (c.creator) creatorLocal[c.creator] = (creatorLocal[c.creator] ?? 0) + 1;
             }
 
             const book = get().playbook;
@@ -1311,7 +1402,7 @@ export const useTrench = create<TrenchState>()(
                 recordKill("cheap", coin, cheap, now);
                 continue;
               }
-              if ((creatorLocal[coin.creator] ?? 0) >= 3) {
+              if (coin.creator && (creatorLocal[coin.creator] ?? 0) >= 3) {
                 recordKill(
                   "serial",
                   coin,
@@ -1323,14 +1414,18 @@ export const useTrench = create<TrenchState>()(
               survivors.push(coin);
             }
 
-            const inspect = survivors.slice(0, 4);
+            const inspect = survivors.slice(0, get().tapeVenue === "pons" ? 6 : 4);
             const leftover: PumpCoin[] = [];
             for (const coin of inspect) {
+              if (isEvmMint(coin.creator) || isEvmMint(coin.mint) || get().tapeVenue === "pons") {
+                /* Pons serial is local-shift only — no pump.fun creator history. */
+              } else {
               const hist = await fetchCreator({ data: { address: coin.creator } });
               const serial = serialKill(hist.count, hist.symbols, coin);
               if (serial) {
                 recordKill("serial", coin, serial, now);
                 continue;
+              }
               }
 
               const st = get();
@@ -1444,7 +1539,9 @@ export const useTrench = create<TrenchState>()(
               log(
                 "TILL",
                 "sys",
-                `SHADOW · ${vetTag()} would spend ${shadow.sol.toFixed(3)} SOL ($${shadow.usd.toFixed(2)}) on $${coin.symbol} · cap ${LIVE_CAP_SOL}.`,
+                st.tapeVenue === "pons" || isEvmMint(coin.mint)
+                  ? `PONS paper $${coin.symbol} ${fillUsd.toFixed(2)} usd. ETH hot 0.001 if armed.`
+                  : `SHADOW · ${vetTag()} would spend ${shadow.sol.toFixed(3)} SOL ($${shadow.usd.toFixed(2)}) on $${coin.symbol} · cap ${LIVE_CAP_SOL}.`,
                 { mint: coin.mint, symbol: coin.symbol },
               );
               fireLive("vet", coin.mint, coin.symbol, scored.score);
@@ -1552,7 +1649,9 @@ export const useTrench = create<TrenchState>()(
                 log(
                   "TILL",
                   "sys",
-                  `SHADOW · ${hatchTag()} would spend ${shadow.sol.toFixed(3)} SOL ($${shadow.usd.toFixed(2)}) on $${coin.symbol} · cap ${LIVE_CAP_SOL} · wallet does not sign.`,
+                  st.tapeVenue === "pons" || isEvmMint(coin.mint)
+                    ? `PONS paper $${coin.symbol} ${fillUsd.toFixed(2)} usd. ETH hot 0.001 if armed.`
+                    : `SHADOW · ${hatchTag()} would spend ${shadow.sol.toFixed(3)} SOL ($${shadow.usd.toFixed(2)}) on $${coin.symbol} · cap ${LIVE_CAP_SOL} · wallet does not sign.`,
                   { mint: coin.mint, symbol: coin.symbol },
                 );
                 fireLive("hatch", coin.mint, coin.symbol, scored.score);
@@ -1987,11 +2086,12 @@ export const useTrench = create<TrenchState>()(
             if (get().status !== "watch") maybeCrown(now);
             void maybeAutoBrain();
             const still = get();
-            if (!still.vetDead && !still.rentPaid && eq >= RENT_USD) {
+            if (!still.vetDead && !still.rentPaid && eq >= gateUsd(still.round ?? 1)) {
+              const due = gateUsd(still.round ?? 1);
               log(
                 "TILL",
                 "till",
-                `equity ${eq.toFixed(0)} usd. rent of ${RENT_USD} is payable. sweep it or keep running.`,
+                `equity ${eq.toFixed(0)} usd. the gate is ${due}. sweep it or keep running.`,
               );
             }
 
@@ -2327,6 +2427,7 @@ export const useTrench = create<TrenchState>()(
           housePot: typeof p.housePot === "number" ? p.housePot : 0,
           houseBank: typeof p.houseBank === "number" ? p.houseBank : 0,
           lastHotLine: typeof p.lastHotLine === "string" ? p.lastHotLine : null,
+          tapeVenue: p.tapeVenue === "pons" ? "pons" : "pump",
           callsign:
             typeof p.callsign === "string" && p.callsign
               ? p.callsign
@@ -2380,6 +2481,7 @@ export const useTrench = create<TrenchState>()(
         housePot: s.housePot ?? 0,
         houseBank: s.houseBank ?? 0,
         lastHotLine: s.lastHotLine ?? null,
+        tapeVenue: s.tapeVenue === "pons" ? "pons" : "pump",
         callsign: s.callsign || "",
         round: s.round ?? 1,
         roundStartedAt: s.roundStartedAt,

@@ -6,6 +6,12 @@ export type LogKind = "scan" | "kill" | "buy" | "sell" | "meta" | "till" | "sys"
 
 export type SellReason = "stop" | "take" | "time" | "force";
 
+export type TapeVenue = "pump" | "pons";
+
+export function isEvmMint(mint: string): boolean {
+  return /^0x[a-fA-F0-9]{40}$/.test(mint);
+}
+
 export type PumpCoin = {
   mint: string;
   name: string;
@@ -27,6 +33,9 @@ export type PumpCoin = {
   username: string | null;
   lastTradeAt: number | null;
   athMcap: number;
+  venue?: TapeVenue;
+  curve?: string;
+  pair?: string;
 };
 
 export type Position = {
@@ -221,12 +230,24 @@ export const AGENTS: {
   { id: "WARDEN", title: "Warden", owns: "The veto. Then grades it.", never: "Never trades. No beats every score." },
   { id: "SNIPER", title: "Sniper", owns: "Entries. Sizes to the cap.", never: "Never averages. Never enters without an exit." },
   { id: "RISK", title: "Risk", owns: "Writes the exit first. Tightens after a stop.", never: "Never opens. Never widens a stop." },
-  { id: "TILL", title: "Till", owns: "Fees, rent, survival.", never: "Never trades. Never skips the rent." },
+  { id: "TILL", title: "Till", owns: "Fees, the gate, survival.", never: "Never trades. Never skips the gate." },
   { id: "META", title: "Meta", owns: "The playbook. Survives the clone.", never: "Never touches the market." },
 ];
 
 export const STARTING_CASH = 50;
 export const RENT_USD = 300;
+export const GATE_STEP_USD = 150;
+export const GATE_CAP_USD = 1500;
+
+export function gateUsd(round: number): number {
+  const n = Math.max(1, Math.floor(Number.isFinite(round) ? round : 1));
+  return Math.min(GATE_CAP_USD, RENT_USD + (n - 1) * GATE_STEP_USD);
+}
+
+export function cellHeat(round: number): number {
+  const n = Math.max(1, Math.floor(Number.isFinite(round) ? round : 1));
+  return (n - 1) * 3;
+}
 export const MAX_BUY_SOL = 0.22;
 export const STOP_LOSS = -0.5;
 export const TAKE_PROFIT = 0.9;
@@ -235,6 +256,7 @@ export const TRAIL_GIVE = 0.3;
 export const MAX_POSITIONS = 3;
 export const BUY_COOLDOWN_MS = 45_000;
 export const CYCLE_MS = 8_000;
+export const CYCLE_PONS_MS = 3_000;
 export const ROUND_MS = 168 * 60 * 60 * 1000;
 export const BROKE_USD = 10;
 export const SCORE_FLOOR = 45;

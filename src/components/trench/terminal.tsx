@@ -92,6 +92,7 @@ function TrenchInner() {
   const extra = useTrench((s) => s.extra);
   const setHydrated = useTrench((s) => s.setHydrated);
   const cycle = useTrench((s) => s.cycle);
+  const atHome = useTrench((s) => s.atHome);
   const [cloudRole, setCloudRole] = useState<"hunter" | "watch" | "off">("off");
   const hatchLive = !!rival && (rival.status === "alive" || rival.status === "survived");
   const cubLive = !!extra && (extra.status === "alive" || extra.status === "survived");
@@ -149,7 +150,9 @@ function TrenchInner() {
     return <WakeScreen ready={false} />;
   }
 
-  if (status === "idle" && !hatchLive && !cubLive) return <WakeScreen ready />;
+  if (atHome || (status === "idle" && !hatchLive && !cubLive)) {
+    return <WakeScreen ready hunting={hunting && status !== "idle"} />;
+  }
   if (status === "dead") return <DeathScreen />;
   return <Desk cloudRole={cloudRole} />;
 }
@@ -432,9 +435,16 @@ function CloudDock() {
   );
 }
 
-function WakeScreen({ ready = true }: { ready?: boolean }) {
+function WakeScreen({
+  ready = true,
+  hunting = false,
+}: {
+  ready?: boolean;
+  hunting?: boolean;
+}) {
   const arm = useTrench((s) => s.arm);
   const spectate = useTrench((s) => s.spectate);
+  const leaveHome = useTrench((s) => s.leaveHome);
   return (
     <main className="relative flex min-h-dvh flex-col justify-between bg-bg px-5 py-8 sm:px-10 sm:py-12">
       <header className="flex items-center justify-between text-muted">
@@ -456,23 +466,31 @@ function WakeScreen({ ready = true }: { ready?: boolean }) {
           If it dies, the next clone inherits the book. Cash does not.
         </p>
         <div className="stagger-in flex flex-col gap-3 sm:flex-row sm:items-center">
-          <Button
-            size="lg"
-            disabled={!ready}
-            onClick={() => arm()}
-            className="min-h-12 w-full sm:w-auto"
-          >
-            {ready ? `Stake ${formatUsd(STARTING_CASH, 0)}` : "Loading the book…"}
-          </Button>
-          <Button
-            size="lg"
-            variant="ghost"
-            disabled={!ready}
-            onClick={() => spectate()}
-            className="min-h-12 w-full sm:w-auto"
-          >
-            Spectate
-          </Button>
+          {hunting ? (
+            <Button size="lg" onClick={() => leaveHome()} className="min-h-12 w-full sm:w-auto">
+              Back to the pit
+            </Button>
+          ) : (
+            <Button
+              size="lg"
+              disabled={!ready}
+              onClick={() => arm()}
+              className="min-h-12 w-full sm:w-auto"
+            >
+              {ready ? `Stake ${formatUsd(STARTING_CASH, 0)}` : "Loading the book…"}
+            </Button>
+          )}
+          {!hunting ? (
+            <Button
+              size="lg"
+              variant="ghost"
+              disabled={!ready}
+              onClick={() => spectate()}
+              className="min-h-12 w-full sm:w-auto"
+            >
+              Spectate
+            </Button>
+          ) : null}
           <BookDock />
           <CloudDock />
           <p className="font-mono text-2xs leading-relaxed text-subtle">
@@ -565,6 +583,7 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
   const cull = useTrench((s) => s.cull);
   const setFocus = useTrench((s) => s.setFocus);
   const spectate = useTrench((s) => s.spectate);
+  const goHome = useTrench((s) => s.goHome);
   const rentPaid = useTrench((s) => s.rentPaid);
   const status = useTrench((s) => s.status);
   const scanned = useTrench((s) => s.scanned);
@@ -635,7 +654,14 @@ function Desk({ cloudRole = "off" }: { cloudRole?: "hunter" | "watch" | "off" })
       <header className="sticky top-0 z-20 border-b border-line bg-bg/95 backdrop-blur-sm">
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2 px-4 py-3 sm:px-6">
           <div className="flex items-baseline gap-3">
-            <h1 className="text-lg font-semibold tracking-[-0.03em]">TRENCHER</h1>
+            <button
+              type="button"
+              onClick={() => goHome()}
+              className="text-lg font-semibold tracking-[-0.03em] hover:text-muted"
+              title="Home. Hunt keeps running."
+            >
+              TRENCHER
+            </button>
             <StatusChip status={status} ticking={ticking} error={tapeError} />
             {status !== "watch" ? (
             <div className="flex items-center gap-1">

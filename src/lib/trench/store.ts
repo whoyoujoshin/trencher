@@ -105,6 +105,9 @@ type TrenchState = {
   hotPubkey: string | null;
   hotSol: number | null;
   lastHotLine: string | null;
+  atHome: boolean;
+  goHome: () => void;
+  leaveHome: () => void;
   spawnRival: () => void;
   cull: () => void;
   setFocus: (lane: LaneId) => void;
@@ -153,7 +156,7 @@ function blankHouse(): House {
 
 function initial(): Omit<
   TrenchState,
-  "setHydrated" | "arm" | "clone" | "payRent" | "cycle" | "askMeta" | "readLosers" | "snapshotBook" | "ingestBook" | "spawnRival" | "cull" | "setFocus" | "spectate"
+  "setHydrated" | "arm" | "clone" | "payRent" | "cycle" | "askMeta" | "readLosers" | "snapshotBook" | "ingestBook" | "spawnRival" | "cull" | "setFocus" | "spectate" | "goHome" | "leaveHome"
 > {
   return {
     hydrated: false,
@@ -196,6 +199,7 @@ function initial(): Omit<
     hotPubkey: null,
     hotSol: null,
     lastHotLine: null,
+    atHome: false,
   };
 }
 
@@ -746,6 +750,8 @@ export const useTrench = create<TrenchState>()(
         ...initial(),
 
         setHydrated: () => set({ hydrated: true }),
+        goHome: () => set({ atHome: true }),
+        leaveHome: () => set({ atHome: false }),
 
         arm: () => {
           const now = Date.now();
@@ -838,6 +844,7 @@ export const useTrench = create<TrenchState>()(
             ticking: false,
             startedAt: s.startedAt ?? Date.now(),
             focus: "vet",
+            atHome: false,
           });
           log(
             "META",

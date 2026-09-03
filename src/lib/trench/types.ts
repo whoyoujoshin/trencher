@@ -74,7 +74,11 @@ export type ClosedTrade = {
   score: number;
   slipPct: number;
   feeUsd: number;
-  rail?: "paper" | "sol";
+  rail?: "paper" | "sol" | "eth";
+  live?: boolean;
+  entryMcap?: number;
+  peakMcap?: number;
+  peakPct?: number;
 };
 
 export type LogLine = {

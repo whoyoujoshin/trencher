@@ -11,6 +11,7 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as SpiritRouteImport } from './routes/spirit'
+import { Route as HotRouteImport } from './routes/hot'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -22,31 +23,40 @@ const SpiritRoute = SpiritRouteImport.update({
   path: '/spirit',
   getParentRoute: () => rootRouteImport,
 } as any)
+const HotRoute = HotRouteImport.update({
+  id: '/hot',
+  path: '/hot',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/spirit': typeof SpiritRoute
+  '/hot': typeof HotRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/spirit': typeof SpiritRoute
+  '/hot': typeof HotRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/spirit': typeof SpiritRoute
+  '/hot': typeof HotRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/spirit'
+  fullPaths: '/' | '/spirit' | '/hot'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/spirit'
-  id: '__root__' | '/' | '/spirit'
+  to: '/' | '/spirit' | '/hot'
+  id: '__root__' | '/' | '/spirit' | '/hot'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   SpiritRoute: typeof SpiritRoute
+  HotRoute: typeof HotRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -65,12 +75,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof SpiritRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/hot': {
+      id: '/hot'
+      path: '/hot'
+      fullPath: '/hot'
+      preLoaderRoute: typeof HotRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   SpiritRoute: SpiritRoute,
+  HotRoute: HotRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

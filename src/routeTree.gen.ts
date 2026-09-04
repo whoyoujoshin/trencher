@@ -10,17 +10,12 @@
 
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
-import { Route as SpiritRouteImport } from './routes/spirit'
 import { Route as HotRouteImport } from './routes/hot'
+import { Route as SpiritRouteImport } from './routes/spirit'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
   path: '/',
-  getParentRoute: () => rootRouteImport,
-} as any)
-const SpiritRoute = SpiritRouteImport.update({
-  id: '/spirit',
-  path: '/spirit',
   getParentRoute: () => rootRouteImport,
 } as any)
 const HotRoute = HotRouteImport.update({
@@ -28,35 +23,40 @@ const HotRoute = HotRouteImport.update({
   path: '/hot',
   getParentRoute: () => rootRouteImport,
 } as any)
+const SpiritRoute = SpiritRouteImport.update({
+  id: '/spirit',
+  path: '/spirit',
+  getParentRoute: () => rootRouteImport,
+} as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
-  '/spirit': typeof SpiritRoute
   '/hot': typeof HotRoute
+  '/spirit': typeof SpiritRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
-  '/spirit': typeof SpiritRoute
   '/hot': typeof HotRoute
+  '/spirit': typeof SpiritRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
-  '/spirit': typeof SpiritRoute
   '/hot': typeof HotRoute
+  '/spirit': typeof SpiritRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/spirit' | '/hot'
+  fullPaths: '/' | '/hot' | '/spirit'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/spirit' | '/hot'
-  id: '__root__' | '/' | '/spirit' | '/hot'
+  to: '/' | '/hot' | '/spirit'
+  id: '__root__' | '/' | '/hot' | '/spirit'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
-  SpiritRoute: typeof SpiritRoute
   HotRoute: typeof HotRoute
+  SpiritRoute: typeof SpiritRoute
 }
 
 declare module '@tanstack/react-router' {
@@ -68,13 +68,6 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof IndexRouteImport
       parentRoute: typeof rootRouteImport
     }
-    '/spirit': {
-      id: '/spirit'
-      path: '/spirit'
-      fullPath: '/spirit'
-      preLoaderRoute: typeof SpiritRouteImport
-      parentRoute: typeof rootRouteImport
-    }
     '/hot': {
       id: '/hot'
       path: '/hot'
@@ -82,13 +75,20 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof HotRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/spirit': {
+      id: '/spirit'
+      path: '/spirit'
+      fullPath: '/spirit'
+      preLoaderRoute: typeof SpiritRouteImport
+      parentRoute: typeof rootRouteImport
+    }
   }
 }
 
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
-  SpiritRoute: SpiritRoute,
   HotRoute: HotRoute,
+  SpiritRoute: SpiritRoute,
 }
 export const routeTree = rootRouteImport
   ._addFileChildren(rootRouteChildren)

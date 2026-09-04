@@ -435,18 +435,30 @@ async function signAndSendEthSteps(
   const account = privateKeyToAccount(pk);
   let last = "";
   for (const step of steps) {
-    const signed = await account.signTransaction({
-      to: step.to as `0x${string}`,
-      data: step.data as `0x${string}`,
-      value: BigInt(step.value),
-      gas: BigInt(step.gas),
-      gasPrice: BigInt(step.gasPrice),
-      nonce: step.nonce,
-      chainId: step.chainId,
-      type: "legacy",
-    });
-    const sent = await sendSignedEthTx({ data: { raw: signed } });
-    if (!sent.ok || !sent.hash) return { ok: false, error: sent.error || "eth send failed" };
+    let fee = BigInt(step.gasPrice);
+    let sent: { ok: boolean; hash?: string | null; error?: string | null } | null = null;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const tip = fee / 8n > 0n ? fee / 8n : 1n;
+      const signed = await account.signTransaction({
+        to: step.to as `0x${string}`,
+        data: step.data as `0x${string}`,
+        value: BigInt(step.value),
+        gas: BigInt(step.gas),
+        maxFeePerGas: fee,
+        maxPriorityFeePerGas: tip,
+        nonce: step.nonce,
+        chainId: step.chainId,
+        type: "eip1559",
+      });
+      sent = await sendSignedEthTx({ data: { raw: signed } });
+      if (sent.ok && sent.hash) break;
+      const err = String(sent.error ?? "");
+      if (!err.toLowerCase().includes("base fee") && !err.toLowerCase().includes("max fee")) {
+        return { ok: false, error: sent.error || "eth send failed" };
+      }
+      fee = fee * 2n;
+    }
+    if (!sent?.ok || !sent.hash) return { ok: false, error: sent?.error || "eth send failed" };
     last = sent.hash;
   }
   return { ok: true, hash: last };

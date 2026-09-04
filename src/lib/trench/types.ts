@@ -8,8 +8,28 @@ export type SellReason = "stop" | "take" | "time" | "force";
 
 export type TapeVenue = "pump" | "pons";
 
+export type TapeHeat = {
+  venue: TapeVenue;
+  at: number;
+  ok: boolean;
+  launches: number;
+  named: number;
+  live: number;
+  runners: number;
+  flowUsd: number;
+  newestAgeMs: number;
+  score: number;
+};
+
 export function isEvmMint(mint: string): boolean {
   return /^0x[a-fA-F0-9]{40}$/.test(mint);
+}
+
+export type Rail = "paper" | "sol" | "eth";
+
+export function stampRail(mint: string, live: boolean): Rail {
+  if (!live) return "paper";
+  return isEvmMint(mint) ? "eth" : "sol";
 }
 
 export type PumpCoin = {
@@ -74,10 +94,7 @@ export type ClosedTrade = {
   score: number;
   slipPct: number;
   feeUsd: number;
-  rail?: "paper" | "sol" | "eth";
-  live?: boolean;
-  entryMcap?: number;
-  peakMcap?: number;
+  rail?: Rail;
   peakPct?: number;
 };
 
@@ -235,7 +252,7 @@ export const AGENTS: {
   { id: "SNIPER", title: "Sniper", owns: "Entries. Sizes to the cap.", never: "Never averages. Never enters without an exit." },
   { id: "RISK", title: "Risk", owns: "Writes the exit first. Tightens after a stop.", never: "Never opens. Never widens a stop." },
   { id: "TILL", title: "Till", owns: "Fees, the gate, survival.", never: "Never trades. Never skips the gate." },
-  { id: "META", title: "Meta", owns: "The playbook. Survives the clone.", never: "Never touches the market." },
+  { id: "META", title: "Meta", owns: "Weather knobs. Survives the clone.", never: "Never rewrites Warden or spirit." },
 ];
 
 export const STARTING_CASH = 50;
@@ -254,16 +271,79 @@ export function cellHeat(round: number): number {
 }
 export const MAX_BUY_SOL = 0.22;
 export const STOP_LOSS = -0.5;
+export const STOP_LOSS_PONS = -0.22;
 export const TAKE_PROFIT = 0.9;
-export const TRAIL_ARM = 1;
+export const TRAIL_ARM = 0.4;
 export const TRAIL_GIVE = 0.3;
+export const TRAIL_ARM_PONS = 0.45;
+export const TRAIL_GIVE_PONS = 0.18;
+export const HARD_TAKE_PONS = 0.85;
+export const GREEN_ARM = 0.12;
+export const GREEN_KEEP = 0.02;
 export const MAX_POSITIONS = 3;
 export const BUY_COOLDOWN_MS = 45_000;
+export const BUY_COOLDOWN_PONS_MS = 12_000;
 export const CYCLE_MS = 8_000;
 export const CYCLE_PONS_MS = 3_000;
 export const ROUND_MS = 168 * 60 * 60 * 1000;
 export const BROKE_USD = 10;
 export const SCORE_FLOOR = 45;
+export type WeatherKind = "died" | "woke" | "rip" | "bleed" | "harvest" | "venue";
+
+export type TapePrint = {
+  n: number;
+  takePct: number;
+  stopPct: number;
+  timePct: number;
+  flatPct: number;
+  runnerPct: number;
+  gaveBackPct: number;
+  modestGavePct: number;
+  source: "hot" | "paper";
+  avgHold: number;
+  scarStreak: number;
+  launches: number;
+  live: number;
+  runners: number;
+  heatScore: number;
+  venue: TapeVenue;
+};
+
+export type Weather = {
+  at: number;
+  kind: WeatherKind[];
+  venue: TapeVenue | "stay";
+  bar: number;
+  size: number;
+  sitMs: number;
+  trailArm: number;
+  trailArmPump: number;
+  trailGivePump: number;
+  greenArm: number;
+  greenKeep: number;
+  line: string;
+  print: TapePrint | null;
+};
+
+export function blankWeather(): Weather {
+  return {
+    at: 0,
+    kind: [],
+    venue: "stay",
+    bar: SCORE_FLOOR,
+    size: 1,
+    sitMs: 90_000,
+    trailArm: TRAIL_ARM_PONS,
+    trailArmPump: TRAIL_ARM,
+    trailGivePump: TRAIL_GIVE,
+    greenArm: GREEN_ARM,
+    greenKeep: GREEN_KEEP,
+    line: "open sky",
+    print: null,
+  };
+}
+
+export const WEATHER_COOLDOWN_MS = 20 * 60_000;
 export const FEE_RATE = 0.01;
 export const GRADE_AFTER_MS = 75_000;
 export const FLAT_AFTER_MS = 12 * 60_000;

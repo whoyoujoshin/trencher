@@ -1,7 +1,7 @@
 import { Link } from "@tanstack/react-router";
 import { useMemo, useState } from "react";
 import { useTrench } from "@/lib/trench/store";
-import type { ClosedTrade, LaneId } from "@/lib/trench/types";
+import type { ClosedTrade, LaneId, Rail } from "@/lib/trench/types";
 import { formatPct, formatUsd } from "@/lib/utils";
 
 type Row = ClosedTrade & { lane: LaneId; sign: string };
@@ -33,6 +33,10 @@ function hold(ms: number): string {
   return `${Math.floor(m / 60)}h ${m % 60}m`;
 }
 
+function isHot(t: { rail?: Rail }): boolean {
+  return t.rail === "sol" || t.rail === "eth";
+}
+
 export function HotBlotter() {
   const closed = useTrench((s) => s.closed);
   const rival = useTrench((s) => s.rival);
@@ -43,17 +47,23 @@ export function HotBlotter() {
   const rows = useMemo(() => {
     const pack: Row[] = [
       ...closed.map((t) => ({ ...t, lane: "vet" as const, sign: callsign || "vet" })),
-      ...((rival?.closed ?? []).map((t) => ({ ...t, lane: "hatch" as const, sign: rival?.callsign || "hatch" }))),
-      ...((extra?.closed ?? []).map((t) => ({ ...t, lane: "cub" as const, sign: extra?.callsign || "cub" }))),
+      ...((rival?.closed ?? []).map((t) => ({
+        ...t,
+        lane: "hatch" as const,
+        sign: rival?.callsign || "hatch",
+      }))),
+      ...((extra?.closed ?? []).map((t) => ({
+        ...t,
+        lane: "cub" as const,
+        sign: extra?.callsign || "cub",
+      }))),
     ];
     pack.sort((a, b) => b.closedAt - a.closedAt);
-    if (rail === "hot") {
-      return pack.filter((t) => t.live || t.rail === "sol" || t.rail === "eth");
-    }
+    if (rail === "hot") return pack.filter(isHot);
     return pack;
   }, [closed, rival, extra, callsign, rail]);
 
-  const hot = rows.filter((t) => t.live || t.rail === "sol" || t.rail === "eth");
+  const hot = rows.filter(isHot);
   const n = hot.length;
   const wins = hot.filter((t) => t.pnlUsd > 0).length;
   const pnl = hot.reduce((s, t) => s + t.pnlUsd, 0);
@@ -68,13 +78,16 @@ export function HotBlotter() {
             <p className="font-mono text-2xs tracking-kicker text-subtle uppercase">hot wallet</p>
             <h1 className="mt-1 text-2xl font-semibold tracking-[-0.03em] sm:text-3xl">Blotter</h1>
           </div>
-          <Link to="/" className="font-mono text-2xs tracking-label text-muted uppercase hover:text-fg">
+          <Link
+            to="/"
+            className="font-mono text-2xs tracking-label text-muted uppercase hover:text-fg"
+          >
             ← back to the desk
           </Link>
         </div>
         <p className="mt-3 max-w-2xl text-sm leading-relaxed text-muted text-pretty">
-          Live SOL and ETH fills only. Peak is the high-water mark while the clip was open.
-          Fill is where RISK actually booked it. The gap is what we missed.
+          Live SOL and ETH fills. Peak is the high while the clip was open. Fill is where
+          RISK booked it. The gap is what we missed.
         </p>
         <div className="mt-4 flex flex-wrap gap-3 font-mono text-2xs text-muted">
           <span>{n} hot clips</span>
@@ -107,7 +120,7 @@ export function HotBlotter() {
             No hot fills in this cell yet. Paper stays on the desk. New live closes stamp peak.
           </p>
         ) : (
-          <table className="w-full min-w-[52rem] border-collapse text-left">
+          <table className="w-full min-w-[48rem] border-collapse text-left">
             <thead>
               <tr className="font-mono text-micro tracking-label text-subtle uppercase">
                 <th className="py-2 pr-3 font-normal">ticker</th>
@@ -132,7 +145,9 @@ export function HotBlotter() {
                     <td className="py-2 pr-3 font-mono text-2xs text-fg">${t.symbol}</td>
                     <td className="py-2 pr-3 font-mono text-2xs text-muted">{t.sign}</td>
                     <td className="py-2 pr-3 font-mono text-2xs text-muted">{t.rail ?? "paper"}</td>
-                    <td className={`py-2 pr-3 font-mono text-2xs ${t.pnlPct >= 0 ? "text-gain" : "text-loss"}`}>
+                    <td
+                      className={`py-2 pr-3 font-mono text-2xs ${t.pnlPct >= 0 ? "text-gain" : "text-loss"}`}
+                    >
                       {formatPct(t.pnlPct)}
                     </td>
                     <td className="py-2 pr-3 font-mono text-2xs text-fg">
@@ -141,7 +156,9 @@ export function HotBlotter() {
                     <td className="py-2 pr-3 font-mono text-2xs text-loss">
                       {left != null && left > 0.02 ? formatPct(left) : "—"}
                     </td>
-                    <td className={`py-2 pr-3 font-mono text-2xs ${t.pnlUsd >= 0 ? "text-gain" : "text-loss"}`}>
+                    <td
+                      className={`py-2 pr-3 font-mono text-2xs ${t.pnlUsd >= 0 ? "text-gain" : "text-loss"}`}
+                    >
                       {formatUsd(t.pnlUsd)}
                     </td>
                     <td className="py-2 pr-3 font-mono text-2xs text-muted">{t.reason}</td>

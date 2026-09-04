@@ -5,6 +5,7 @@ import {
   fetchQuotes,
   fetchTape,
   fetchPonsTape,
+  fetchTapeHeat,
   consultMeta,
 } from "./server";
 import {
@@ -15,7 +16,9 @@ import {
   climbPlaybook,
   decideGrade,
   decideSell,
+  deadChair,
   detectMeta,
+  exitMcap,
   heatPlaybook,
   makeKill,
   masteryOf,
@@ -23,6 +26,7 @@ import {
   paperSlip,
   pnlPct,
   pickHotLane,
+  ponsWake,
   positionValue,
   reviewLosersLocal,
   scoreSetup,
@@ -30,6 +34,20 @@ import {
   setupMatch,
   sizeByScore,
   snapshotText,
+  formatBlotter,
+  isHotFill,
+  scarSit,
+  minClip,
+  tapeHeat,
+  takeWindow,
+  windowPrint,
+  regimeShift,
+  writeWeather,
+  weatherHolds,
+  canWriteWeather,
+  paperFloor,
+  emptyPrint,
+  trailSpec,
 } from "./logic";
 import { ntfyHeartbeat, pingNtfy } from "./ntfy";
 import { amHunter, deskPin, syncCloud } from "./cloud";
@@ -40,12 +58,19 @@ import {
   AGENTS,
   BROKE_USD,
   BUY_COOLDOWN_MS,
+  BUY_COOLDOWN_PONS_MS,
   MAX_POSITIONS,
   ROUND_MS,
   SCORE_FLOOR,
   STARTING_CASH,
   TRAIL_ARM,
   TRAIL_GIVE,
+  TRAIL_ARM_PONS,
+  TRAIL_GIVE_PONS,
+  HARD_TAKE_PONS,
+  GREEN_ARM,
+  GREEN_KEEP,
+  STOP_LOSS_PONS,
   gateUsd,
   type AgentId,
   type AgentPulse,
@@ -67,11 +92,26 @@ import {
   type LaneId,
   type SellReason,
   type TapeVenue,
+  type TapeHeat,
   isEvmMint,
   mintCallsign,
+  stampRail,
+  blankWeather,
+  WEATHER_COOLDOWN_MS,
+  type Weather,
 } from "./types";
 
 let lastPonsQuietAt = 0;
+let lastRivalHeatAt = 0;
+const ponsTried = new Set<string>();
+const hushAt = new Map<string, number>();
+
+function hush(key: string, ms: number): boolean {
+  const t = Date.now();
+  if (t - (hushAt.get(key) ?? 0) < ms) return true;
+  hushAt.set(key, t);
+  return false;
+}
 
 type TrenchState = {
   hydrated: boolean;
@@ -86,6 +126,9 @@ type TrenchState = {
   ticking: boolean;
   tapeError: string | null;
   tapeVenue: TapeVenue;
+  heatPump: TapeHeat | null;
+  heatPons: TapeHeat | null;
+  weather: Weather;
   scanned: number;
   killed: number;
   seen: string[];
@@ -130,6 +173,8 @@ type TrenchState = {
   arm: () => void;
   clone: () => void;
   payRent: () => void;
+  dumpClip: (mint: string) => void;
+  dumpRunners: () => void;
   cycle: () => Promise<void>;
   askMeta: () => Promise<void>;
   readLosers: () => Promise<void>;
@@ -170,7 +215,7 @@ function blankHouse(): House {
 
 function initial(): Omit<
   TrenchState,
-  "setHydrated" | "arm" | "clone" | "payRent" | "cycle" | "askMeta" | "readLosers" | "snapshotBook" | "ingestBook" | "spawnRival" | "cull" | "setFocus" | "spectate" | "goHome" | "leaveHome" | "setTapeVenue"
+  "setHydrated" | "arm" | "clone" | "payRent" | "dumpClip" | "dumpRunners" | "cycle" | "askMeta" | "readLosers" | "snapshotBook" | "ingestBook" | "spawnRival" | "cull" | "setFocus" | "spectate" | "goHome" | "leaveHome" | "setTapeVenue"
 > {
   return {
     hydrated: false,
@@ -185,6 +230,9 @@ function initial(): Omit<
     ticking: false,
     tapeError: null,
     tapeVenue: "pump",
+    heatPump: null,
+    heatPons: null,
+    weather: blankWeather(),
     scanned: 0,
     killed: 0,
     seen: [],
@@ -243,6 +291,23 @@ function takeOf(p: Position, book: Playbook): number {
   return p.takePct ?? book.takePct;
 }
 
+function clipStop(book: Playbook, venue: TapeVenue): number {
+  return venue === "pons" ? Math.max(book.stopPct, STOP_LOSS_PONS) : book.stopPct;
+}
+
+function laneInsolvent(
+  cash: number,
+  positions: Position[],
+  venue: TapeVenue,
+  solUsd: number,
+  weather?: Weather,
+): boolean {
+  const eq = equityOf(cash, positions);
+  if (eq < BROKE_USD) return true;
+  if (positions.length > 0) return false;
+  return sizeByScore(cash, solUsd, 80, venue, weather) < minClip(venue);
+}
+
 function hatchOn(r: Rival | null | undefined): boolean {
   return !!r && (r.status === "alive" || r.status === "survived");
 }
@@ -273,6 +338,17 @@ function occupiedMints(s: {
   const m = new Set(s.positions.map((p) => p.mint));
   for (const p of s.rival?.positions ?? []) m.add(p.mint);
   for (const p of s.extra?.positions ?? []) m.add(p.mint);
+  return m;
+}
+
+function occupiedTickers(s: {
+  positions: Position[];
+  rival: Rival | null;
+  extra?: Rival | null;
+}): Set<string> {
+  const m = new Set(s.positions.map((p) => p.symbol.toLowerCase()));
+  for (const p of s.rival?.positions ?? []) m.add(p.symbol.toLowerCase());
+  for (const p of s.extra?.positions ?? []) m.add(p.symbol.toLowerCase());
   return m;
 }
 
@@ -354,6 +430,9 @@ export const useTrench = create<TrenchState>()(
       }
 
       let lastCap: LaneId | null = null;
+      let liveBurst = 0;
+      let liveBurstAt = 0;
+
       function announceCaptain() {
         const id = captain();
         if (id === lastCap) return;
@@ -412,8 +491,17 @@ export const useTrench = create<TrenchState>()(
 
       function fireLive(lane: LaneId, mint: string, symbol: string, score: number) {
         if (isEvmMint(mint) || get().tapeVenue === "pons") {
-          if (!hotAutoArmed()) return;
-          if (captain() !== lane) return;
+          if (!hotAutoArmed()) {
+            if (!hush("live:off", 90_000)) {
+              log(
+                "TILL",
+                "sys",
+                `hot is not armed. $${symbol} scored ${score} stays paper.`,
+                { mint, symbol },
+              );
+            }
+            return;
+          }
           const spiritFloor = Math.max(
             SCORE_FLOOR,
             useSpirit.getState().canon?.scoreFloor ?? SCORE_FLOOR,
@@ -427,6 +515,19 @@ export const useTrench = create<TrenchState>()(
             );
             return;
           }
+          const now = Date.now();
+          if (now - liveBurstAt > 15_000) liveBurst = 0;
+          if (liveBurst >= 1) {
+            log(
+              "TILL",
+              "sys",
+              `$${symbol} scored ${score} ≥ spirit ${spiritFloor}. live already spent this burst. paper.`,
+              { mint, symbol },
+            );
+            return;
+          }
+          liveBurst += 1;
+          liveBurstAt = now;
           void ethHotBuy(mint, symbol).then((r) => {
             log("TILL", r.ok ? "till" : "sys", r.text, { mint, symbol });
             set({ lastHotLine: r.text });
@@ -490,6 +591,128 @@ export const useTrench = create<TrenchState>()(
           set({ lastHotLine: r.text });
           if (r.ok) pingNtfy("TRENCHER", `HOT SELL $${symbol}`, true);
         });
+      }
+
+      function paperExit(lane: LaneId, p: Position, reason: SellReason, now: number, note?: string) {
+        const st = get();
+        const book =
+          lane === "hatch"
+            ? st.rival?.playbook ?? st.playbook
+            : lane === "cub"
+              ? st.extra?.playbook ?? st.playbook
+              : st.playbook;
+        const venue = st.tapeVenue;
+        const wx = st.weather ?? blankWeather();
+        const mark = exitMcap(p, venue, wx);
+        const pct = pnlPct(p.costUsd, p.entryMcap, mark);
+        const peakPct = p.entryMcap > 0 ? p.peakMcap / p.entryMcap - 1 : 0;
+        const gapped = mark > p.lastMcap + 1e-9;
+        const held = now - p.openedAt;
+        const proceeds = positionValue(p.costUsd, p.entryMcap, mark);
+        const feeBuy = p.feeUsd ?? 0;
+        const feeSell = paperFee(proceeds);
+        const net = Math.round((proceeds - feeSell) * 100) / 100;
+        const fees = Math.round((feeBuy + feeSell) * 100) / 100;
+        const trade: ClosedTrade = {
+          mint: p.mint,
+          symbol: p.symbol,
+          name: p.name,
+          creator: p.creator ?? "",
+          costUsd: p.costUsd,
+          proceedsUsd: net,
+          pnlUsd: Math.round((net - p.costUsd - feeBuy) * 100) / 100,
+          pnlPct: pct,
+          reason,
+          heldMs: held,
+          openedAt: p.openedAt,
+          closedAt: now,
+          score: p.score ?? 0,
+          slipPct: p.slipPct ?? 0,
+          feeUsd: fees,
+          rail: stampRail(p.mint, !!(p.live || isLiveMint(p.mint))),
+          peakPct,
+        };
+        const heldLabel =
+          held < 60_000 ? `${Math.round(held / 1000)}s` : `${Math.round(held / 60000)}m`;
+        const tag = lane === "hatch" ? hatchTag() : lane === "cub" ? cubTag() : "";
+        const prefix = tag ? `${tag} · ` : "";
+        const line = note
+          ? `${prefix}${note}`
+          : gapped
+            ? `${prefix}trail filled on the rug $${p.symbol}. peak +${(peakPct * 100).toFixed(0)}% booked +${(pct * 100).toFixed(0)}%.`
+            : reason === "stop"
+              ? `${prefix}stopped $${p.symbol} at ${(pct * 100).toFixed(0)}% in ${heldLabel}. written exit, no feelings.`
+              : reason === "take"
+                ? `${prefix}took $${p.symbol} +${(pct * 100).toFixed(0)}% after ${heldLabel}.`
+                : `${prefix}time stop $${p.symbol} ${(pct * 100).toFixed(0)}% after ${heldLabel}.`;
+        if (lane === "vet") {
+          const learned = absorbTrade(trade, book, st.meta);
+          set((s) => ({
+            cash: s.cash + net,
+            feesPaid: (s.feesPaid ?? 0) + feeSell,
+            positions: s.positions.filter((x) => x.mint !== p.mint),
+            closed: [trade, ...s.closed].slice(0, 40),
+            playbook: learned.playbook,
+            meta: learned.meta,
+          }));
+          remember(learned.lessons);
+        } else if (lane === "hatch" && st.rival) {
+          const learned = absorbTrade(trade, book, st.meta);
+          set((s) =>
+            s.rival
+              ? {
+                  rival: {
+                    ...s.rival,
+                    cash: s.rival.cash + net,
+                    feesPaid: (s.rival.feesPaid ?? 0) + feeSell,
+                    positions: s.rival.positions.filter((x) => x.mint !== p.mint),
+                    closed: [trade, ...s.rival.closed].slice(0, 40),
+                    playbook: learned.playbook,
+                    lessons: [
+                      ...learned.lessons.map((e) => ({ ...e, id: nid() })),
+                      ...s.rival.lessons,
+                    ].slice(0, 24),
+                  },
+                  meta: learned.meta,
+                }
+              : {},
+          );
+          for (const e of learned.lessons) log(e.agent, "sys", `${hatchTag()} · ${e.text}`);
+        } else if (lane === "cub" && st.extra) {
+          const learned = absorbTrade(trade, book, st.meta);
+          set((s) =>
+            s.extra
+              ? {
+                  extra: {
+                    ...s.extra,
+                    cash: s.extra.cash + net,
+                    feesPaid: (s.extra.feesPaid ?? 0) + feeSell,
+                    positions: s.extra.positions.filter((x) => x.mint !== p.mint),
+                    closed: [trade, ...s.extra.closed].slice(0, 40),
+                    playbook: learned.playbook,
+                    lessons: [
+                      ...learned.lessons.map((e) => ({ ...e, id: nid() })),
+                      ...s.extra.lessons,
+                    ].slice(0, 24),
+                  },
+                  meta: learned.meta,
+                }
+              : {},
+          );
+        }
+        log("RISK", "sell", line, { mint: p.mint, symbol: p.symbol });
+        fireLiveSell(p);
+        log(
+          "TILL",
+          "till",
+          `${prefix}fee $${p.symbol} sell ${feeSell.toFixed(2)} usd. round trip ${fees.toFixed(2)}.`,
+          { mint: p.mint, symbol: p.symbol },
+        );
+        pingNtfy(
+          reason === "take" ? "TAKE" : "STOP",
+          `${prefix}$${p.symbol} ${(pct * 100).toFixed(0)}% ${reason} · cash`,
+          true,
+        );
       }
 
       function hunters() {
@@ -752,17 +975,76 @@ export const useTrench = create<TrenchState>()(
         }
       }
 
+      function wxNow(): Weather {
+        return get().weather ?? blankWeather();
+      }
+      function spiritNow(): number {
+        return Math.max(SCORE_FLOOR, useSpirit.getState().canon?.scoreFloor ?? SCORE_FLOOR);
+      }
+      function floorOf(book: Playbook): number {
+        return paperFloor(book, wxNow(), spiritNow());
+      }
+
+      function maybeWeather(now = Date.now()) {
+        const s = get();
+        if (s.status === "watch" || s.status === "idle") return;
+        const venue = s.tapeVenue;
+        const closed = [...s.closed, ...(s.rival?.closed ?? []), ...(s.extra?.closed ?? [])].sort(
+          (a, b) => b.closedAt - a.closedAt,
+        );
+        const batch = takeWindow(closed, now);
+        if (batch.length < 6) return;
+        const heat = venue === "pons" ? s.heatPons : s.heatPump;
+        const other = venue === "pons" ? s.heatPump : s.heatPons;
+        const nowP = windowPrint(batch, heat, venue);
+        const prev = wxNow();
+        const prior = prev.print ?? emptyPrint(venue);
+        const first = !prev.print;
+        const flags = regimeShift(prior, nowP, other);
+        const need = first ? 1 : 2;
+        if (flags.length < need) {
+          if (!prev.print) set({ weather: { ...prev, print: nowP } });
+          return;
+        }
+        if (!canWriteWeather(prev, now)) return;
+        const next = writeWeather(prev, flags, nowP, spiritNow(), other, now);
+        const src = nowP.source === "hot" ? "hot blotter" : "paper desk";
+        if (weatherHolds(prev, next) && prev.at) {
+          if (!hush("weather:hold", WEATHER_COOLDOWN_MS)) {
+            log("META", "meta", `${src} holds. ${prev.line}`);
+          }
+          set({ weather: { ...prev, print: nowP } });
+          return;
+        }
+        set({ weather: next });
+        log(
+          "META",
+          "meta",
+          `${src} · ${batch.length} ${nowP.source === "hot" ? "live" : "paper"} · green back ${(nowP.modestGavePct * 100).toFixed(0)}% · ${next.line}`,
+        );
+        if (next.venue !== "stay" && next.venue !== venue) {
+          log(
+            "SCOUT",
+            "sys",
+            `${next.venue} is the weather. flip the chip. open clips stay on ${venue}.`,
+          );
+        }
+      }
+
       function maybeAutoBrain() {
         const s = get();
         if (s.status === "watch" || s.status === "idle" || s.grokBusy) return;
         if (!s.tape.length) return;
         const now = Date.now();
         if (now - (s.grokLastAt || 0) < 8 * 60_000) return;
-        const losses = [
+        const allClosed = [
           ...s.closed,
           ...(s.rival?.closed ?? []),
           ...(s.extra?.closed ?? []),
-        ].filter((t) => t.pnlUsd < 0);
+        ];
+        const hot = allClosed.filter(isHotFill);
+        const pool = hot.length >= 4 ? hot : allClosed;
+        const losses = pool.filter((t) => t.pnlUsd < 0);
         if (losses.length >= 2 && now - (s.meta.updatedAt || 0) > 10 * 60_000) {
           void get().readLosers();
         } else {
@@ -1036,7 +1318,22 @@ export const useTrench = create<TrenchState>()(
 
         setHydrated: () => set({ hydrated: true }),
         goHome: () => set({ atHome: true }),
-        leaveHome: () => set({ atHome: false }),
+        leaveHome: () => {
+          const s = get();
+          const hasCell =
+            !!s.startedAt ||
+            !!s.roundStartedAt ||
+            hatchOn(s.rival) ||
+            liveBody(s.extra) ||
+            (s.scanned ?? 0) > 0;
+          const next =
+            s.status === "idle" && hasCell
+              ? s.rentPaid
+                ? "survived"
+                : "alive"
+              : s.status;
+          set({ atHome: false, status: next });
+        },
 
         setTapeVenue: (venue) => {
           const next = venue === "pons" ? "pons" : "pump";
@@ -1050,6 +1347,7 @@ export const useTrench = create<TrenchState>()(
                 ? get().seen.filter((m) => !isEvmMint(m))
                 : get().seen,
           });
+          ponsTried.clear();
           log(
             "SCOUT",
             "sys",
@@ -1108,6 +1406,7 @@ export const useTrench = create<TrenchState>()(
             house: { ...prev, generation: gen },
             playbook: book,
             meta,
+            weather: get().weather ?? blankWeather(),
             lessons: fromSpirit
               ? spirit.lessons.slice(0, 12)
               : inherited
@@ -1285,6 +1584,79 @@ export const useTrench = create<TrenchState>()(
           log("TILL", "till", `focused body needs ${due} cash for the gate. flatten a bag first.`);
         },
 
+        dumpClip: (mint: string) => {
+          const s = get();
+          if (s.status === "watch") {
+            log("TILL", "sys", "this window is watching. hunter holds the book.");
+            return;
+          }
+          const key = mint.toLowerCase();
+          const hit =
+            s.positions.find((p) => p.mint === mint || p.mint.toLowerCase() === key)
+              ? ({ lane: "vet" as const, p: s.positions.find((p) => p.mint === mint || p.mint.toLowerCase() === key)! })
+              : s.rival?.positions.find((p) => p.mint === mint || p.mint.toLowerCase() === key)
+                ? {
+                    lane: "hatch" as const,
+                    p: s.rival.positions.find((p) => p.mint === mint || p.mint.toLowerCase() === key)!,
+                  }
+                : s.extra?.positions.find((p) => p.mint === mint || p.mint.toLowerCase() === key)
+                  ? {
+                      lane: "cub" as const,
+                      p: s.extra.positions.find((p) => p.mint === mint || p.mint.toLowerCase() === key)!,
+                    }
+                  : null;
+          if (!hit) {
+            log("TILL", "sys", "that mint is not on the book.");
+            return;
+          }
+          const pct = pnlPct(hit.p.costUsd, hit.p.entryMcap, hit.p.lastMcap);
+          const peakPct = hit.p.entryMcap > 0 ? hit.p.peakMcap / hit.p.entryMcap - 1 : 0;
+          paperExit(
+            hit.lane,
+            hit.p,
+            "force",
+            Date.now(),
+            `you cut $${hit.p.symbol} at +${(pct * 100).toFixed(0)}% (peak +${(peakPct * 100).toFixed(0)}%).`,
+          );
+          if (amHunter()) void syncCloud(true);
+        },
+
+        dumpRunners: () => {
+          const s = get();
+          if (s.status === "watch") {
+            log("TILL", "sys", "this window is watching. hunter holds the book.");
+            return;
+          }
+          const now = Date.now();
+          const packs: { lane: LaneId; list: Position[] }[] = [
+            { lane: "vet", list: s.positions },
+            ...(s.rival ? [{ lane: "hatch" as const, list: s.rival.positions }] : []),
+            ...(s.extra ? [{ lane: "cub" as const, list: s.extra.positions }] : []),
+          ];
+          let n = 0;
+          for (const pack of packs) {
+            for (const p of [...pack.list]) {
+              const pct = pnlPct(p.costUsd, p.entryMcap, p.lastMcap);
+              const peakPct = p.entryMcap > 0 ? p.peakMcap / p.entryMcap - 1 : 0;
+              if (pct < 1 && peakPct < 1) continue;
+              paperExit(
+                pack.lane,
+                p,
+                "force",
+                now,
+                `you banked runner $${p.symbol} at +${(pct * 100).toFixed(0)}% (peak +${(peakPct * 100).toFixed(0)}%).`,
+              );
+              n += 1;
+            }
+          }
+          if (!n) {
+            log("TILL", "sys", "no clip is up a hundred percent. trail still working.");
+            return;
+          }
+          log("RISK", "sell", `you banked ${n} runner${n === 1 ? "" : "s"} before the rug.`);
+          if (amHunter()) void syncCloud(true);
+        },
+
         cycle: async () => {
           const s0 = get();
           const watching = s0.status === "watch";
@@ -1367,6 +1739,113 @@ export const useTrench = create<TrenchState>()(
 
             set({ tape: merged.slice(0, 60) });
 
+            {
+              const venue = get().tapeVenue;
+              const active = tapeHeat(merged, venue, now);
+              if (venue === "pons") set({ heatPons: active });
+              else set({ heatPump: active });
+              if (now - lastRivalHeatAt > 30_000) {
+                lastRivalHeatAt = now;
+                void fetchTapeHeat().then((h) => {
+                  const pumpH = h.pump.ok
+                    ? tapeHeat(h.pump.coins, "pump", h.at)
+                    : { ...tapeHeat([], "pump", h.at), ok: false, score: 0 };
+                  const ponsH = h.pons.ok
+                    ? tapeHeat(h.pons.coins, "pons", h.at)
+                    : { ...tapeHeat([], "pons", h.at), ok: false, score: 0 };
+                  const here = get().tapeVenue;
+                  set({
+                    heatPump: here === "pump" ? get().heatPump : pumpH,
+                    heatPons: here === "pons" ? get().heatPons : ponsH,
+                  });
+                  const mine = here === "pons" ? get().heatPons : get().heatPump;
+                  const other = here === "pons" ? pumpH : ponsH;
+                  if (
+                    mine &&
+                    other.ok &&
+                    other.score > mine.score * 1.5 &&
+                    other.launches >= 4 &&
+                    !hush("heat:flip", 120_000)
+                  ) {
+                    log(
+                      "SCOUT",
+                      "sys",
+                      `${other.venue} is hotter · ${other.launches} launches / 10m · ${other.live} live · ${other.runners} runners. ${here} is thin.`,
+                    );
+                  }
+                });
+              }
+            }
+
+            const boardMap = new Map<string, PumpCoin>();
+            for (const c of merged) boardMap.set(c.mint.toLowerCase(), c);
+            const markPos = (p: Position): Position => {
+              const hit = boardMap.get(p.mint.toLowerCase());
+              if (!hit || !(hit.usdMcap > 0)) return p;
+              return {
+                ...p,
+                lastMcap: hit.usdMcap,
+                peakMcap: Math.max(p.peakMcap, hit.usdMcap, hit.athMcap || 0),
+              };
+            };
+            set((s) => ({
+              positions: s.positions.map(markPos),
+              rival: s.rival
+                ? { ...s.rival, positions: s.rival.positions.map(markPos) }
+                : s.rival,
+              extra: s.extra
+                ? { ...s.extra, positions: s.extra.positions.map(markPos) }
+                : s.extra,
+            }));
+
+            const venueNow = get().tapeVenue;
+            const sweep = (lane: LaneId) => {
+              const s = get();
+              const pack =
+                lane === "vet"
+                  ? { list: s.positions, book: s.playbook }
+                  : lane === "hatch" && hatchOn(s.rival) && s.rival
+                    ? { list: s.rival.positions, book: s.rival.playbook }
+                    : lane === "cub" && liveBody(s.extra) && s.extra
+                      ? { list: s.extra.positions, book: s.extra.playbook }
+                      : null;
+              if (!pack) return;
+              for (const p of [...pack.list]) {
+                const reason = decideSell(p, now, pack.book, venueNow, wxNow());
+                if (reason) paperExit(lane, p, reason, now);
+              }
+            };
+            sweep("vet");
+            sweep("hatch");
+            sweep("cub");
+
+            const coolMs =
+              venueNow === "pons" ? BUY_COOLDOWN_PONS_MS : BUY_COOLDOWN_MS;
+            const freeChair = (lane: LaneId): boolean => {
+              const s = get();
+              const list =
+                lane === "vet"
+                  ? s.positions
+                  : lane === "hatch"
+                    ? s.rival?.positions
+                    : s.extra?.positions;
+              if (!list || list.length < MAX_POSITIONS) return true;
+              const dead = deadChair(list, now, wxNow().sitMs);
+              if (!dead) return false;
+              const pos = list.find((x) => x.mint === dead.mint);
+              if (!pos) return false;
+              const who =
+                lane === "hatch" ? `${hatchTag()} · ` : lane === "cub" ? `${cubTag()} · ` : "";
+              paperExit(
+                lane,
+                pos,
+                "time",
+                now,
+                `${who}cleared dead chair $${pos.symbol}. was not moving.`,
+              );
+              return true;
+            };
+
             const seen = new Set(get().seen);
             const fresh = tape.newest.filter((c) => !seen.has(c.mint));
             if (fresh.length) {
@@ -1375,11 +1854,16 @@ export const useTrench = create<TrenchState>()(
                 "scan",
                 `${fresh.length} new launch${fresh.length === 1 ? "" : "es"} on the wire. not sizing.`,
               );
-            } else if (get().tapeVenue === "pons" && !tape.newest.length) {
-              if (Date.now() - lastPonsQuietAt > 60_000) {
-                lastPonsQuietAt = Date.now();
-                log("SCOUT", "sys", "pons wire is quiet. waiting on new 1% pools.");
-              }
+            } else if (get().tapeVenue === "pons" && Date.now() - lastPonsQuietAt > 90_000) {
+              lastPonsQuietAt = Date.now();
+              const n = merged.length;
+              log(
+                "SCOUT",
+                "sys",
+                n
+                  ? `thin tape · ${n} on the board · no new prints.`
+                  : "pons wire is quiet. waiting on new pools.",
+              );
             }
 
             set((s) => ({ scanned: s.scanned + fresh.length }));
@@ -1390,26 +1874,54 @@ export const useTrench = create<TrenchState>()(
             }
 
             const book = get().playbook;
+            const pool =
+              get().tapeVenue === "pons"
+                ? ponsWake(
+                    fresh,
+                    tape.traded,
+                    seen,
+                    occupiedMints(get()),
+                    get().kills ?? [],
+                    ponsTried,
+                  )
+                : fresh;
             const survivors: PumpCoin[] = [];
-            for (const coin of fresh) {
+            for (const coin of pool) {
+              const mid = coin.mint.toLowerCase();
+              const waking = seen.has(coin.mint) || seen.has(mid);
+              if (waking && ponsTried.has(mid)) continue;
               seen.add(coin.mint);
               if (book.bannedCreators.includes(coin.creator)) {
-                recordKill("memory", coin, "this wallet already dumped us. memory.", now);
+                if (!waking) recordKill("memory", coin, "this wallet already dumped us. memory.", now);
                 continue;
               }
               const cheap = cheapKill(coin, now);
               if (cheap) {
-                recordKill("cheap", coin, cheap, now);
+                if (!waking) recordKill("cheap", coin, cheap, now);
                 continue;
               }
               if (coin.creator && (creatorLocal[coin.creator] ?? 0) >= 3) {
-                recordKill(
-                  "serial",
-                  coin,
-                  `same wallet dropped ${creatorLocal[coin.creator]} coins on this shift. no beats the score.`,
-                  now,
-                );
+                if (!waking) {
+                  recordKill(
+                    "serial",
+                    coin,
+                    `same wallet dropped ${creatorLocal[coin.creator]} coins on this shift. no beats the score.`,
+                    now,
+                  );
+                }
                 continue;
+              }
+              ponsTried.add(mid);
+              if (ponsTried.size > 200) {
+                const keep = Array.from(ponsTried).slice(-120);
+                ponsTried.clear();
+                for (const m of keep) ponsTried.add(m);
+              }
+              if (waking && !hush(`wake:${mid}`, 180_000)) {
+                log("SCOUT", "scan", `rescored $${coin.symbol} — curve woke.`, {
+                  mint: coin.mint,
+                  symbol: coin.symbol,
+                });
               }
               survivors.push(coin);
             }
@@ -1438,6 +1950,12 @@ export const useTrench = create<TrenchState>()(
               const scored = scoreSetup(coin, st.meta, now, st.playbook);
               const held = occupiedMints(st);
               if (held.has(coin.mint)) continue;
+              if (occupiedTickers(st).has(coin.symbol.toLowerCase())) {
+                if (!hush(`tick:${coin.symbol}`, 90_000)) {
+                  log("SNIPER", "scan", `$${coin.symbol} already in a chair. one ticker.`);
+                }
+                continue;
+              }
 
               const vetHunting =
                 !st.vetDead &&
@@ -1447,30 +1965,45 @@ export const useTrench = create<TrenchState>()(
                 leftover.push(coin);
                 continue;
               }
-              if (scored.score < st.playbook.scoreFloor) {
+              if (scored.score < floorOf(st.playbook)) {
                 recordKill(
                   "score",
                   coin,
-                  `scored ${scored.score} vs floor ${st.playbook.scoreFloor}. no beats the sniper.`,
+                  `scored ${scored.score} vs floor ${floorOf(st.playbook)}. no beats the sniper.`,
                   now,
                 );
                 leftover.push(coin);
                 continue;
               }
-              if (st.positions.length >= MAX_POSITIONS) {
-                log("SNIPER", "scan", `$${coin.symbol} passed warden. book is full.`);
+              if (scarSit(st.closed, now)) {
+                if (!hush("scar:vet", 90_000)) {
+                  log("RISK", "sys", "three scars. sitting 4m. not feeding the tape.");
+                }
                 leftover.push(coin);
                 continue;
               }
-              if (now - st.lastBuyAt < BUY_COOLDOWN_MS) {
-                log("SNIPER", "scan", `$${coin.symbol} passed warden. cooling down.`);
+              if (st.positions.length >= MAX_POSITIONS) {
+                if (!freeChair("vet")) {
+                  if (!hush("full:vet", 90_000)) {
+                    log("SNIPER", "scan", `$${coin.symbol} passed warden. book is full.`);
+                  }
+                  leftover.push(coin);
+                  continue;
+                }
+              }
+              if (now - st.lastBuyAt < coolMs) {
+                if (!hush("cool:vet", 90_000)) {
+                  log("SNIPER", "scan", `$${coin.symbol} passed warden. cooling down.`);
+                }
                 leftover.push(coin);
                 continue;
               }
 
-              const intended = sizeByScore(st.cash, st.solUsd, scored.score);
-              if (intended < 4) {
-                log("SNIPER", "sys", "size under 4 usd against the risk cap. waiting on cash.");
+              const intended = sizeByScore(st.cash, st.solUsd, scored.score, st.tapeVenue, wxNow());
+              if (intended < minClip(st.tapeVenue)) {
+                if (!hush("cash:vet", 90_000)) {
+                  log("SNIPER", "sys", "size under 4 usd against the risk cap. waiting on cash.");
+                }
                 leftover.push(coin);
                 continue;
               }
@@ -1498,7 +2031,7 @@ export const useTrench = create<TrenchState>()(
                 lastMcap: mcap,
                 openedAt: now,
                 score: scored.score,
-                stopPct: st.playbook.stopPct,
+                stopPct: clipStop(st.playbook, st.tapeVenue),
                 takePct: st.playbook.takePct,
                 intendedUsd: intended,
                 slipPct,
@@ -1508,7 +2041,14 @@ export const useTrench = create<TrenchState>()(
               log(
                 "RISK",
                 "sys",
-                `exit written $${coin.symbol}: stop ${(st.playbook.stopPct * 100).toFixed(0)}% / trail arms +${(TRAIL_ARM * 100).toFixed(0)}% then give ${(TRAIL_GIVE * 100).toFixed(0)}% of peak. no hard take.`,
+                `exit written $${coin.symbol}: stop ${(clipStop(st.playbook, st.tapeVenue) * 100).toFixed(0)}% / ${
+                  (() => {
+                    const spec = trailSpec(st.tapeVenue, wxNow());
+                    return st.tapeVenue === "pons"
+                      ? `hard +${((spec.hard ?? HARD_TAKE_PONS) * 100).toFixed(0)}% / trail +${(spec.arm * 100).toFixed(0)}% then give ${(spec.give * 100).toFixed(0)}% of peak.`
+                      : `trail arms +${(spec.arm * 100).toFixed(0)}% then give ${(spec.give * 100).toFixed(0)}% of peak. no hard take.`;
+                  })()
+                }`,
                 { mint: coin.mint, symbol: coin.symbol },
               );
               set((s) => ({
@@ -1565,12 +2105,13 @@ export const useTrench = create<TrenchState>()(
                 const r = st.rival;
                 if (!hatchOn(r) || !r || r.rentPaid) break;
                 if (occupiedMints(st).has(coin.mint)) continue;
+                if (occupiedTickers(st).has(coin.symbol.toLowerCase())) continue;
                 const scored = scoreSetup(coin, st.meta, now, r.playbook);
-                if (scored.score < r.playbook.scoreFloor) {
+                if (scored.score < floorOf(r.playbook)) {
                   log(
                     "WARDEN",
                     "kill",
-                    `${hatchTag()} · veto $${coin.symbol} — scored ${scored.score} vs floor ${r.playbook.scoreFloor}. no beats the sniper.`,
+                    `${hatchTag()} · veto $${coin.symbol} — scored ${scored.score} vs floor ${floorOf(r.playbook)}. no beats the sniper.`,
                     { mint: coin.mint, symbol: coin.symbol },
                   );
                   set((s) =>
@@ -1580,24 +2121,40 @@ export const useTrench = create<TrenchState>()(
                   );
                   continue;
                 }
+                if (scarSit(r.closed, now)) {
+                  if (!hush("scar:hatch", 90_000)) {
+                    log("RISK", "sys", `${hatchTag()} · three scars. sitting 4m. not feeding the tape.`);
+                  }
+                  continue;
+                }
                 if (r.positions.length >= MAX_POSITIONS) {
-                  log("SNIPER", "scan", `${hatchTag()} · $${coin.symbol} passed warden. book is full.`);
+                  if (!freeChair("hatch")) {
+                    if (!hush("full:hatch", 90_000)) {
+                      log("SNIPER", "scan", `${hatchTag()} · $${coin.symbol} passed warden. book is full.`);
+                    }
+                    continue;
+                  }
+                }
+                const r2 = get().rival;
+                if (!hatchOn(r2) || !r2) break;
+                if (now - r2.lastBuyAt < coolMs) {
+                  if (!hush("cool:hatch", 90_000)) {
+                    log("SNIPER", "scan", `${hatchTag()} · $${coin.symbol} passed warden. cooling down.`);
+                  }
                   continue;
                 }
-                if (now - r.lastBuyAt < BUY_COOLDOWN_MS) {
-                  log("SNIPER", "scan", `${hatchTag()} · $${coin.symbol} passed warden. cooling down.`);
-                  continue;
-                }
-                const intended = sizeByScore(r.cash, st.solUsd, scored.score);
-                if (intended < 4) {
-                  log("SNIPER", "sys", `${hatchTag()} · size under 4 usd. waiting on cash.`);
+                const intended = sizeByScore(r2.cash, st.solUsd, scored.score, st.tapeVenue, wxNow());
+                if (intended < minClip(st.tapeVenue)) {
+                  if (!hush("cash:hatch", 90_000)) {
+                    log("SNIPER", "sys", `${hatchTag()} · size under 4 usd. waiting on cash.`);
+                  }
                   continue;
                 }
                 const slipPct = paperSlip(coin.usdMcap);
                 const fillUsd = Math.round(intended * (1 + slipPct) * 100) / 100;
                 const feeUsd = paperFee(fillUsd);
                 const debit = fillUsd + feeUsd;
-                if (r.cash < debit) {
+                if (r2.cash < debit) {
                   log("TILL", "till", `${hatchTag()} · $${coin.symbol} fill plus fee is ${debit.toFixed(2)}. not enough cash.`);
                   continue;
                 }
@@ -1614,7 +2171,7 @@ export const useTrench = create<TrenchState>()(
                   lastMcap: mcap,
                   openedAt: now,
                   score: scored.score,
-                  stopPct: r.playbook.stopPct,
+                  stopPct: clipStop(r.playbook, st.tapeVenue),
                   takePct: r.playbook.takePct,
                   intendedUsd: intended,
                   slipPct,
@@ -1623,7 +2180,14 @@ export const useTrench = create<TrenchState>()(
                 log(
                   "RISK",
                   "sys",
-                  `${hatchTag()} · exit written $${coin.symbol}: stop ${(r.playbook.stopPct * 100).toFixed(0)}% / trail +${(TRAIL_ARM * 100).toFixed(0)}% / −${(TRAIL_GIVE * 100).toFixed(0)}% peak.`,
+                  `${hatchTag()} · exit written $${coin.symbol}: stop ${(clipStop(r.playbook, st.tapeVenue) * 100).toFixed(0)}% / ${
+                    (() => {
+                      const spec = trailSpec(st.tapeVenue, wxNow());
+                      return st.tapeVenue === "pons"
+                        ? `hard +${((spec.hard ?? HARD_TAKE_PONS) * 100).toFixed(0)}% / trail +${(spec.arm * 100).toFixed(0)}%/−${(spec.give * 100).toFixed(0)}% peak.`
+                        : `trail +${(spec.arm * 100).toFixed(0)}% / −${(spec.give * 100).toFixed(0)}% peak.`;
+                    })()
+                  }`,
                   { mint: coin.mint, symbol: coin.symbol },
                 );
                 set((s) =>
@@ -1670,12 +2234,13 @@ export const useTrench = create<TrenchState>()(
                 const r = st.extra;
                 if (!liveBody(r) || !r || r.rentPaid) break;
                 if (occupiedMints(st).has(coin.mint)) continue;
+                if (occupiedTickers(st).has(coin.symbol.toLowerCase())) continue;
                 const scored = scoreSetup(coin, st.meta, now, r.playbook);
-                if (scored.score < r.playbook.scoreFloor) {
+                if (scored.score < floorOf(r.playbook)) {
                   log(
                     "WARDEN",
                     "kill",
-                    `${cubTag()} · veto $${coin.symbol} — scored ${scored.score} vs floor ${r.playbook.scoreFloor}. no beats the sniper.`,
+                    `${cubTag()} · veto $${coin.symbol} — scored ${scored.score} vs floor ${floorOf(r.playbook)}. no beats the sniper.`,
                     { mint: coin.mint, symbol: coin.symbol },
                   );
                   set((s) =>
@@ -1685,24 +2250,40 @@ export const useTrench = create<TrenchState>()(
                   );
                   continue;
                 }
+                if (scarSit(r.closed, now)) {
+                  if (!hush("scar:cub", 90_000)) {
+                    log("RISK", "sys", `${cubTag()} · three scars. sitting 4m. not feeding the tape.`);
+                  }
+                  continue;
+                }
                 if (r.positions.length >= MAX_POSITIONS) {
-                  log("SNIPER", "scan", `${cubTag()} · $${coin.symbol} passed warden. book is full.`);
+                  if (!freeChair("cub")) {
+                    if (!hush("full:cub", 90_000)) {
+                      log("SNIPER", "scan", `${cubTag()} · $${coin.symbol} passed warden. book is full.`);
+                    }
+                    continue;
+                  }
+                }
+                const c2 = get().extra;
+                if (!liveBody(c2) || !c2) break;
+                if (now - c2.lastBuyAt < coolMs) {
+                  if (!hush("cool:cub", 90_000)) {
+                    log("SNIPER", "scan", `${cubTag()} · $${coin.symbol} passed warden. cooling down.`);
+                  }
                   continue;
                 }
-                if (now - r.lastBuyAt < BUY_COOLDOWN_MS) {
-                  log("SNIPER", "scan", `${cubTag()} · $${coin.symbol} passed warden. cooling down.`);
-                  continue;
-                }
-                const intended = sizeByScore(r.cash, st.solUsd, scored.score);
-                if (intended < 4) {
-                  log("SNIPER", "sys", `${cubTag()} · size under 4 usd. waiting on cash.`);
+                const intended = sizeByScore(c2.cash, st.solUsd, scored.score, st.tapeVenue, wxNow());
+                if (intended < minClip(st.tapeVenue)) {
+                  if (!hush("cash:cub", 90_000)) {
+                    log("SNIPER", "sys", `${cubTag()} · size under 4 usd. waiting on cash.`);
+                  }
                   continue;
                 }
                 const slipPct = paperSlip(coin.usdMcap);
                 const fillUsd = Math.round(intended * (1 + slipPct) * 100) / 100;
                 const feeUsd = paperFee(fillUsd);
                 const debit = fillUsd + feeUsd;
-                if (r.cash < debit) {
+                if (c2.cash < debit) {
                   log("TILL", "till", `${cubTag()} · $${coin.symbol} fill plus fee is ${debit.toFixed(2)}. not enough cash.`);
                   continue;
                 }
@@ -1719,7 +2300,7 @@ export const useTrench = create<TrenchState>()(
                   lastMcap: mcap,
                   openedAt: now,
                   score: scored.score,
-                  stopPct: r.playbook.stopPct,
+                  stopPct: clipStop(r.playbook, st.tapeVenue),
                   takePct: r.playbook.takePct,
                   intendedUsd: intended,
                   slipPct,
@@ -1728,7 +2309,14 @@ export const useTrench = create<TrenchState>()(
                 log(
                   "RISK",
                   "sys",
-                  `${cubTag()} · exit written $${coin.symbol}: stop ${(r.playbook.stopPct * 100).toFixed(0)}% / trail +${(TRAIL_ARM * 100).toFixed(0)}% / −${(TRAIL_GIVE * 100).toFixed(0)}% peak.`,
+                  `${cubTag()} · exit written $${coin.symbol}: stop ${(clipStop(r.playbook, st.tapeVenue) * 100).toFixed(0)}% / ${
+                    (() => {
+                      const spec = trailSpec(st.tapeVenue, wxNow());
+                      return st.tapeVenue === "pons"
+                        ? `hard +${((spec.hard ?? HARD_TAKE_PONS) * 100).toFixed(0)}% / trail +${(spec.arm * 100).toFixed(0)}%/−${(spec.give * 100).toFixed(0)}% peak.`
+                        : `trail +${(spec.arm * 100).toFixed(0)}% / −${(spec.give * 100).toFixed(0)}% peak.`;
+                    })()
+                  }`,
                   { mint: coin.mint, symbol: coin.symbol },
                 );
                 set((s) =>
@@ -1788,7 +2376,7 @@ export const useTrench = create<TrenchState>()(
 
             if (live.positions.length) {
               const marked = live.positions.map((p) => {
-                const q = quotes[p.mint];
+                const q = quotes[p.mint] || quotes[p.mint.toLowerCase()];
                 if (!q) return p;
                 const last = q.usdMcap || p.lastMcap;
                 return {
@@ -1801,68 +2389,8 @@ export const useTrench = create<TrenchState>()(
 
               const after = get();
               for (const p of after.positions) {
-                const pct = pnlPct(p.costUsd, p.entryMcap, p.lastMcap);
-                const held = now - p.openedAt;
-                const reason = decideSell(p, now, after.playbook);
-                if (!reason) continue;
-
-                const proceeds = positionValue(p.costUsd, p.entryMcap, p.lastMcap);
-                const feeBuy = p.feeUsd ?? 0;
-                const feeSell = paperFee(proceeds);
-                const net = Math.round((proceeds - feeSell) * 100) / 100;
-                const fees = Math.round((feeBuy + feeSell) * 100) / 100;
-                const trade: ClosedTrade = {
-                  mint: p.mint,
-                  symbol: p.symbol,
-                  name: p.name,
-                  creator: p.creator ?? "",
-                  costUsd: p.costUsd,
-                  proceedsUsd: net,
-                  pnlUsd: Math.round((net - p.costUsd - feeBuy) * 100) / 100,
-                  pnlPct: pct,
-                  reason,
-                  heldMs: held,
-                  openedAt: p.openedAt,
-                  closedAt: now,
-                  score: p.score ?? 0,
-                  slipPct: p.slipPct ?? 0,
-                  feeUsd: fees,
-                  rail: p.live || isLiveMint(p.mint) ? "sol" : "paper",
-                };
-                set((s) => ({
-                  cash: s.cash + net,
-                  feesPaid: (s.feesPaid ?? 0) + feeSell,
-                  positions: s.positions.filter((x) => x.mint !== p.mint),
-                  closed: [trade, ...s.closed].slice(0, 40),
-                }));
-                const heldLabel =
-                  held < 60_000
-                    ? `${Math.round(held / 1000)}s`
-                    : `${Math.round(held / 60000)}m`;
-                const line =
-                  reason === "stop"
-                    ? `stopped $${p.symbol} at ${(pct * 100).toFixed(0)}% in ${heldLabel}. written exit, no feelings.`
-                    : reason === "take"
-                      ? `trailed $${p.symbol} off peak. now +${(pct * 100).toFixed(0)}% after ${heldLabel}. no hard take.`
-                      : `time stop $${p.symbol} ${(pct * 100).toFixed(0)}% after ${heldLabel}.`;
-                log("RISK", "sell", line, { mint: p.mint, symbol: p.symbol });
-                fireLiveSell(p);
-                log(
-                  "TILL",
-                  "till",
-                  `fee $${p.symbol} sell ${feeSell.toFixed(2)} usd. round trip ${fees.toFixed(2)}.`,
-                  { mint: p.mint, symbol: p.symbol },
-                );
-                pingNtfy(
-                  reason === "take" ? "TAKE" : "STOP",
-                  `vet $${p.symbol} ${(pct * 100).toFixed(0)}% ${reason} · ${get().cash.toFixed(2)} cash`,
-                  true,
-                );
-
-                const cur = get();
-                const learned = absorbTrade(trade, cur.playbook, cur.meta);
-                set({ playbook: learned.playbook, meta: learned.meta });
-                remember(learned.lessons);
+                const reason = decideSell(p, now, after.playbook, after.tapeVenue, wxNow());
+                if (reason) paperExit("vet", p, reason, now);
               }
             }
 
@@ -1870,7 +2398,7 @@ export const useTrench = create<TrenchState>()(
               const r0 = get().rival;
               if (r0 && r0.positions.length) {
                 const marked = r0.positions.map((p) => {
-                  const q = quotes[p.mint];
+                  const q = quotes[p.mint] || quotes[p.mint.toLowerCase()];
                   if (!q) return p;
                   const last = q.usdMcap || p.lastMcap;
                   return {
@@ -1882,80 +2410,11 @@ export const useTrench = create<TrenchState>()(
                 set((s) => (s.rival ? { rival: { ...s.rival, positions: marked } } : {}));
                 const after = get().rival;
                 if (after) {
-                  for (const p of after.positions) {
+                  for (const p of [...after.positions]) {
                     const rNow = get().rival;
                     if (!rNow) break;
-                    const pct = pnlPct(p.costUsd, p.entryMcap, p.lastMcap);
-                    const held = now - p.openedAt;
-                    let reason: SellReason | null = null;
-                    if (pct <= stopOf(p, rNow.playbook)) reason = "stop";
-                    else if (pct >= takeOf(p, rNow.playbook)) reason = "take";
-                    else if (held > 8 * 60_000 && pct < 0) reason = "time";
-                    else if (held > 25 * 60_000 && pct < 0.25) reason = "time";
-                    if (!reason) continue;
-                    const proceeds = positionValue(p.costUsd, p.entryMcap, p.lastMcap);
-                    const feeBuy = p.feeUsd ?? 0;
-                    const feeSell = paperFee(proceeds);
-                    const net = Math.round((proceeds - feeSell) * 100) / 100;
-                    const fees = Math.round((feeBuy + feeSell) * 100) / 100;
-                    const trade: ClosedTrade = {
-                      mint: p.mint,
-                      symbol: p.symbol,
-                      name: p.name,
-                      creator: p.creator ?? "",
-                      costUsd: p.costUsd,
-                      proceedsUsd: net,
-                      pnlUsd: Math.round((net - p.costUsd - feeBuy) * 100) / 100,
-                      pnlPct: pct,
-                      reason,
-                      heldMs: held,
-                      openedAt: p.openedAt,
-                      closedAt: now,
-                      score: p.score ?? 0,
-                      slipPct: p.slipPct ?? 0,
-                      feeUsd: fees,
-                      rail: p.live || isLiveMint(p.mint) ? "sol" : "paper",
-                    };
-                    const learned = absorbTrade(trade, rNow.playbook, get().meta);
-                    set((s) =>
-                      s.rival
-                        ? {
-                            rival: {
-                              ...s.rival,
-                              cash: s.rival.cash + net,
-                              feesPaid: (s.rival.feesPaid ?? 0) + feeSell,
-                              positions: s.rival.positions.filter((x) => x.mint !== p.mint),
-                              closed: [trade, ...s.rival.closed].slice(0, 40),
-                              playbook: learned.playbook,
-                              lessons: [
-                                ...learned.lessons.map((e) => ({ ...e, id: nid() })),
-                                ...s.rival.lessons,
-                              ].slice(0, 24),
-                            },
-                            meta: learned.meta,
-                          }
-                        : {},
-                    );
-                    const heldLabel =
-                      held < 60_000
-                        ? `${Math.round(held / 1000)}s`
-                        : `${Math.round(held / 60000)}m`;
-                    const line =
-                      reason === "stop"
-                        ? `${hatchTag()} · stopped $${p.symbol} at ${(pct * 100).toFixed(0)}% in ${heldLabel}.`
-                        : reason === "take"
-                          ? `${hatchTag()} · took profit on $${p.symbol} +${(pct * 100).toFixed(0)}% after ${heldLabel}.`
-                          : `${hatchTag()} · time stop $${p.symbol} ${(pct * 100).toFixed(0)}% after ${heldLabel}.`;
-                    log("RISK", "sell", line, { mint: p.mint, symbol: p.symbol });
-                    fireLiveSell(p);
-                    pingNtfy(
-                      reason === "take" ? "TAKE" : "STOP",
-                      `${hatchTag()} $${p.symbol} ${(pct * 100).toFixed(0)}% ${reason} · ${get().rival?.cash.toFixed(2) ?? "—"} cash`,
-                      true,
-                    );
-                    for (const e of learned.lessons) {
-                      log(e.agent, "sys", `${hatchTag()} · ${e.text}`);
-                    }
+                    const reason = decideSell(p, now, rNow.playbook, get().tapeVenue, wxNow());
+                    if (reason) paperExit("hatch", p, reason, now);
                   }
                 }
               }
@@ -1965,7 +2424,7 @@ export const useTrench = create<TrenchState>()(
               const r0 = get().extra;
               if (r0 && r0.positions.length) {
                 const marked = r0.positions.map((p) => {
-                  const q = quotes[p.mint];
+                  const q = quotes[p.mint] || quotes[p.mint.toLowerCase()];
                   if (!q) return p;
                   const last = q.usdMcap || p.lastMcap;
                   return {
@@ -1977,71 +2436,11 @@ export const useTrench = create<TrenchState>()(
                 set((s) => (s.extra ? { extra: { ...s.extra, positions: marked } } : {}));
                 const after = get().extra;
                 if (after) {
-                  for (const p of after.positions) {
+                  for (const p of [...after.positions]) {
                     const rNow = get().extra;
                     if (!rNow) break;
-                    const pct = pnlPct(p.costUsd, p.entryMcap, p.lastMcap);
-                    const held = now - p.openedAt;
-                    let reason: SellReason | null = null;
-                    if (pct <= stopOf(p, rNow.playbook)) reason = "stop";
-                    else if (pct >= takeOf(p, rNow.playbook)) reason = "take";
-                    else if (held > 8 * 60_000 && pct < 0) reason = "time";
-                    else if (held > 25 * 60_000 && pct < 0.25) reason = "time";
-                    if (!reason) continue;
-                    const proceeds = positionValue(p.costUsd, p.entryMcap, p.lastMcap);
-                    const feeBuy = p.feeUsd ?? 0;
-                    const feeSell = paperFee(proceeds);
-                    const net = Math.round((proceeds - feeSell) * 100) / 100;
-                    const trade: ClosedTrade = {
-                      mint: p.mint,
-                      symbol: p.symbol,
-                      name: p.name,
-                      creator: p.creator ?? "",
-                      costUsd: p.costUsd,
-                      proceedsUsd: net,
-                      pnlUsd: Math.round((net - p.costUsd - feeBuy) * 100) / 100,
-                      pnlPct: pct,
-                      reason,
-                      heldMs: held,
-                      openedAt: p.openedAt,
-                      closedAt: now,
-                      score: p.score ?? 0,
-                      slipPct: p.slipPct ?? 0,
-                      feeUsd: Math.round((feeBuy + feeSell) * 100) / 100,
-                      rail: "paper",
-                    };
-                    const learned = absorbTrade(trade, rNow.playbook, get().meta);
-                    set((s) =>
-                      s.extra
-                        ? {
-                            extra: {
-                              ...s.extra,
-                              cash: s.extra.cash + net,
-                              feesPaid: (s.extra.feesPaid ?? 0) + feeSell,
-                              positions: s.extra.positions.filter((x) => x.mint !== p.mint),
-                              closed: [trade, ...s.extra.closed].slice(0, 40),
-                              playbook: learned.playbook,
-                              lessons: [
-                                ...learned.lessons.map((e) => ({ ...e, id: nid() })),
-                                ...s.extra.lessons,
-                              ].slice(0, 24),
-                            },
-                            meta: learned.meta,
-                          }
-                        : {},
-                    );
-                    log(
-                      "RISK",
-                      "sell",
-                      `${cubTag()} · ${reason} $${p.symbol} ${(pct * 100).toFixed(0)}%.`,
-                      { mint: p.mint, symbol: p.symbol },
-                    );
-                    fireLiveSell(p);
-                    pingNtfy(
-                      reason === "take" ? "TAKE" : "STOP",
-                      `${cubTag()} $${p.symbol} ${(pct * 100).toFixed(0)}% ${reason} · ${get().extra?.cash.toFixed(2) ?? "—"} cash`,
-                      true,
-                    );
+                    const reason = decideSell(p, now, rNow.playbook, get().tapeVenue, wxNow());
+                    if (reason) paperExit("cub", p, reason, now);
                   }
                 }
               }
@@ -2071,21 +2470,28 @@ export const useTrench = create<TrenchState>()(
             }
 
             const cur = get();
-            const eq = equityOf(cur.cash, cur.positions);
-            if (!cur.vetDead && !cur.rentPaid && eq < BROKE_USD) {
-              die(`can't trade. stack under ${BROKE_USD}. leftover to the house.`);
+            const venueBroke = cur.tapeVenue;
+            const px = cur.solUsd;
+            const wx = wxNow();
+            if (!cur.vetDead && !cur.rentPaid && laneInsolvent(cur.cash, cur.positions, venueBroke, px, wx)) {
+              die(`can't trade. stack is dust. leftover to the house.`, true);
             }
             const rCur = get().rival;
-            if (hatchOn(rCur) && rCur && !rCur.rentPaid && equityOf(rCur.cash, rCur.positions) < BROKE_USD) {
-              dieHatch(`can't trade. stack under ${BROKE_USD}. leftover to the house.`);
+            if (hatchOn(rCur) && rCur && !rCur.rentPaid && laneInsolvent(rCur.cash, rCur.positions, venueBroke, px, wx)) {
+              dieHatch(`can't trade. stack is dust. leftover to the house.`, true);
             }
             const xCur = get().extra;
-            if (liveBody(xCur) && xCur && !xCur.rentPaid && equityOf(xCur.cash, xCur.positions) < BROKE_USD) {
-              dieCub(`can't trade. stack under ${BROKE_USD}. leftover to the house.`);
+            if (liveBody(xCur) && xCur && !xCur.rentPaid && laneInsolvent(xCur.cash, xCur.positions, venueBroke, px, wx)) {
+              dieCub(`can't trade. stack is dust. leftover to the house.`, true);
             }
-            if (get().status !== "watch") maybeCrown(now);
+            if (get().status !== "watch") {
+              maybeCrown(now);
+              fillEmptyChairs();
+            }
+            maybeWeather(now);
             void maybeAutoBrain();
             const still = get();
+            const eq = equityOf(still.cash, still.positions);
             if (!still.vetDead && !still.rentPaid && eq >= gateUsd(still.round ?? 1)) {
               const due = gateUsd(still.round ?? 1);
               log(
@@ -2095,7 +2501,7 @@ export const useTrench = create<TrenchState>()(
               );
             }
 
-            const detected = detectMeta(merged, now);
+            const detected = get().tapeVenue === "pons" ? null : detectMeta(merged, now);
             if (
               detected &&
               detected.thesis !== cur.meta.thesis &&
@@ -2163,6 +2569,11 @@ export const useTrench = create<TrenchState>()(
                 replies: c.replyCount,
               })),
               playbook: `floor ${s.playbook.scoreFloor} stop ${s.playbook.stopPct} take ${s.playbook.takePct} burned ${s.playbook.bannedCreators.length} wallets drop ${s.meta.drop.slice(0, 6).join(",")}`,
+              blotter: formatBlotter(
+                [...s.closed, ...(s.rival?.closed ?? []), ...(s.extra?.closed ?? [])].sort(
+                  (a, b) => b.closedAt - a.closedAt,
+                ),
+              ),
             });
             const res = await consultMeta({ data: { snapshot: snap, mode: "thesis" } });
             if (!res.ok) {
@@ -2188,22 +2599,29 @@ export const useTrench = create<TrenchState>()(
 
         readLosers: async () => {
           const s = get();
-          const losses = [
+          const allClosed = [
             ...s.closed,
             ...(s.rival?.closed ?? []),
             ...(s.extra?.closed ?? []),
-          ].filter((t) => t.pnlUsd < 0);
+          ];
+          const hotLoss = allClosed.filter((t) => isHotFill(t) && t.pnlUsd < 0);
+          const losses = hotLoss.length >= 2 ? hotLoss : allClosed.filter((t) => t.pnlUsd < 0);
           if (losses.length < 2 || s.grokBusy) return;
           if (Date.now() - s.grokLastAt < 20_000) return;
           set({ grokBusy: true, grokError: null });
-          log("META", "sys", `rereading ${losses.length} losing trades. rewriting the drop list.`);
+          log(
+            "META",
+            "sys",
+            `rereading ${losses.length} ${hotLoss.length >= 2 ? "hot" : "paper"} losses. rewriting the drop list.`,
+          );
           try {
             const lossLines = losses
               .slice(0, 12)
-              .map(
-                (t) =>
-                  `$${t.symbol} ${t.name} pnl=${t.pnlUsd.toFixed(2)} score=${t.score ?? 0} reason=${t.reason}`,
-              )
+              .map((t) => {
+                const peak =
+                  typeof t.peakPct === "number" ? ` peak=+${(t.peakPct * 100).toFixed(0)}%` : "";
+                return `$${t.symbol} ${t.name} pnl=${t.pnlUsd.toFixed(2)} fill=${(t.pnlPct * 100).toFixed(0)}%${peak} score=${t.score ?? 0} reason=${t.reason} rail=${t.rail ?? "paper"}`;
+              })
               .join("\n");
             const snap = snapshotText({
               thesis: s.meta.thesis,
@@ -2220,6 +2638,11 @@ export const useTrench = create<TrenchState>()(
               })),
               losses: lossLines,
               playbook: `floor ${s.playbook.scoreFloor} burned ${s.playbook.bannedCreators.length} drop ${s.meta.drop.join(",")}`,
+              blotter: formatBlotter(
+                [...s.closed, ...(s.rival?.closed ?? []), ...(s.extra?.closed ?? [])].sort(
+                  (a, b) => b.closedAt - a.closedAt,
+                ),
+              ),
             });
             const res = await consultMeta({ data: { snapshot: snap, mode: "review" } });
             if (!res.ok) {
@@ -2392,6 +2815,9 @@ export const useTrench = create<TrenchState>()(
         return {
           ...current,
           ...p,
+          atHome: false,
+          hydrated: current.hydrated,
+          ticking: false,
           playbook,
           feesPaid:
             typeof p.feesPaid === "number"
@@ -2428,6 +2854,27 @@ export const useTrench = create<TrenchState>()(
           houseBank: typeof p.houseBank === "number" ? p.houseBank : 0,
           lastHotLine: typeof p.lastHotLine === "string" ? p.lastHotLine : null,
           tapeVenue: p.tapeVenue === "pons" ? "pons" : "pump",
+          weather: (() => {
+            const w = p.weather as Weather | undefined;
+            if (!w || typeof w !== "object") return current.weather ?? blankWeather();
+            return {
+              ...blankWeather(),
+              ...w,
+              kind: Array.isArray(w.kind) ? w.kind : [],
+              bar: typeof w.bar === "number" ? w.bar : SCORE_FLOOR,
+              size: typeof w.size === "number" ? w.size : 1,
+              sitMs: typeof w.sitMs === "number" ? w.sitMs : 90_000,
+              trailArm: typeof w.trailArm === "number" ? w.trailArm : TRAIL_ARM_PONS,
+              trailArmPump: typeof w.trailArmPump === "number" ? w.trailArmPump : TRAIL_ARM,
+              trailGivePump: typeof w.trailGivePump === "number" ? w.trailGivePump : TRAIL_GIVE,
+              greenArm: typeof w.greenArm === "number" ? w.greenArm : GREEN_ARM,
+              greenKeep: typeof w.greenKeep === "number" ? w.greenKeep : GREEN_KEEP,
+              venue: w.venue === "pump" || w.venue === "pons" ? w.venue : "stay",
+              line: typeof w.line === "string" ? w.line : "open sky",
+              print: w.print && typeof w.print === "object" ? w.print : null,
+              at: typeof w.at === "number" ? w.at : 0,
+            };
+          })(),
           callsign:
             typeof p.callsign === "string" && p.callsign
               ? p.callsign
@@ -2444,6 +2891,23 @@ export const useTrench = create<TrenchState>()(
               : typeof p.startedAt === "number"
                 ? p.startedAt
                 : null,
+          status: (() => {
+            const st = typeof p.status === "string" ? p.status : current.status;
+            const hasCell =
+              st === "alive" ||
+              st === "survived" ||
+              st === "watch" ||
+              typeof p.startedAt === "number" ||
+              typeof p.roundStartedAt === "number" ||
+              (typeof p.scanned === "number" && p.scanned > 0) ||
+              (p.rival && typeof p.rival === "object") ||
+              (p.extra && typeof p.extra === "object");
+            if (st === "idle" && hasCell) return "alive";
+            if (st === "alive" || st === "survived" || st === "watch" || st === "dead" || st === "idle") {
+              return st;
+            }
+            return hasCell ? "alive" : current.status;
+          })(),
           house: {
             ...blankHouse(),
             ...(typeof p.house === "object" && p.house ? houseIn : {}),
@@ -2473,6 +2937,7 @@ export const useTrench = create<TrenchState>()(
         logs: s.logs.slice(0, 120),
         lessons: s.lessons.slice(0, 24),
         playbook: s.playbook,
+        weather: s.weather,
         house: s.house,
         rival: s.rival,
         extra: s.extra,

@@ -310,7 +310,7 @@ function packPons(coins: PumpCoin[], ethUsd: number): Extract<PonsTape, { ok: tr
   };
 }
 
-async function geckoPons(ethUsd: number): Promise<PumpCoin[]> {
+async function geckoPons(ethUsd: number, anyQuote = false): Promise<PumpCoin[]> {
   const res = await fetch(
     "https://api.geckoterminal.com/api/v2/networks/robinhood/new_pools?page=1&include=base_token,quote_token",
     { headers: { accept: "application/json", "user-agent": "trencher-desk/1.0" }, signal: AbortSignal.timeout(8000) },
@@ -323,6 +323,7 @@ async function geckoPons(ethUsd: number): Promise<PumpCoin[]> {
         pool_created_at?: string;
         fdv_usd?: string;
         market_cap_usd?: string;
+        volume_usd?: { m5?: string; h1?: string; h24?: string };
       };
       relationships?: {
         base_token?: { data?: { id?: string } };
@@ -340,6 +341,7 @@ async function geckoPons(ethUsd: number): Promise<PumpCoin[]> {
       .filter((x) => x.type === "token")
       .map((x) => [x.id ?? "", x.attributes ?? {}] as const),
   );
+  const isQuote = (addr: string) => addr === RH_WETH || addr === PONS_USDG;
   const out: PumpCoin[] = [];
   for (const pool of body.data ?? []) {
     const quoteId = pool.relationships?.quote_token?.data?.id ?? "";
@@ -348,11 +350,13 @@ async function geckoPons(ethUsd: number): Promise<PumpCoin[]> {
     const base = tokens.get(baseId);
     const quoteAddr = (quote?.address ?? "").toLowerCase();
     const baseAddr = (base?.address ?? "").toLowerCase();
-    const token = quoteAddr === RH_WETH ? base : baseAddr === RH_WETH ? quote : null;
+    const token = isQuote(quoteAddr) ? base : isQuote(baseAddr) ? quote : anyQuote ? base : null;
+    if (!anyQuote && quoteAddr !== RH_WETH && baseAddr !== RH_WETH) continue;
     const mint = (token?.address ?? "").toLowerCase();
-    if (!isEvmMint(mint) || mint === RH_WETH) continue;
+    if (!isEvmMint(mint) || mint === RH_WETH || mint === PONS_USDG) continue;
     const usdMcap = num(pool.attributes?.market_cap_usd) || num(pool.attributes?.fdv_usd);
     const created = Date.parse(pool.attributes?.pool_created_at ?? "") || Date.now();
+    const vol = num(pool.attributes?.volume_usd?.h1) || num(pool.attributes?.volume_usd?.m5) * 12;
     out.push({
       mint,
       name: token?.name || pool.attributes?.name || "unnamed",
@@ -361,8 +365,8 @@ async function geckoPons(ethUsd: number): Promise<PumpCoin[]> {
       image: token?.image_url ?? null,
       creator: "",
       createdAt: created,
-      usdMcap,
-      solMcap: ethUsd > 0 ? usdMcap / ethUsd : 0,
+      usdMcap: usdMcap || vol,
+      solMcap: ethUsd > 0 ? (usdMcap || vol) / ethUsd : 0,
       replyCount: 0,
       complete: false,
       nsfw: false,
@@ -373,7 +377,7 @@ async function geckoPons(ethUsd: number): Promise<PumpCoin[]> {
       website: null,
       username: null,
       lastTradeAt: Date.now(),
-      athMcap: usdMcap,
+      athMcap: usdMcap || vol,
       venue: "pons",
     });
   }
@@ -562,7 +566,7 @@ async function loadPonsTape(): Promise<Extract<PonsTape, { ok: true }>> {
       q?.createdAt ||
       Date.now() - Math.max(0, bn - row.block) * PONS_BLOCK_MS;
     const remaining = extra?.remaining ?? 0;
-    const graduated = row.kind === "v3" || (remaining > 0 && remaining < PONS_SUPPLY * 0.15);
+    const graduated = remaining > 0 && remaining < PONS_SUPPLY * 0.15;
     const coin: PumpCoin = {
       mint: row.token,
       name: q?.name || extra?.name || prev?.name || "unnamed",
@@ -702,6 +706,53 @@ export const fetchPonsTape = createServerFn({ method: "GET" }).handler(async () 
       error: err instanceof Error ? err.message : "pons tape down",
     };
   }
+});
+
+export const fetchTapeHeat = createServerFn({ method: "GET" }).handler(async () => {
+  const pump = await (async () => {
+    try {
+      const raw = await pumpGet(
+        "/coins?offset=0&limit=40&sort=created_timestamp&order=DESC&includeNsfw=false",
+      );
+      return { ok: true as const, coins: asCoins(raw), error: null as string | null };
+    } catch (e) {
+      return {
+        ok: false as const,
+        coins: [] as PumpCoin[],
+        error: e instanceof Error ? e.message : "pump dark",
+      };
+    }
+  })();
+  const pons = await (async () => {
+    try {
+      if (ponsCache && Date.now() - ponsCache.at < PONS_STALE_MS) {
+        return {
+          ok: true as const,
+          coins: ponsCache.tape.newest,
+          error: null as string | null,
+        };
+      }
+      const tape = await loadPonsTape();
+      ponsCache = { at: Date.now(), tape };
+      return { ok: true as const, coins: tape.newest, error: null as string | null };
+    } catch (e) {
+      try {
+        const gecko = await geckoPons(await ethUsdFromDex(), true);
+        return {
+          ok: gecko.length > 0,
+          coins: gecko,
+          error: gecko.length ? null : (e instanceof Error ? e.message : "pons dark"),
+        };
+      } catch (g) {
+        return {
+          ok: false as const,
+          coins: [] as PumpCoin[],
+          error: g instanceof Error ? g.message : "pons dark",
+        };
+      }
+    }
+  })();
+  return { pump, pons, at: Date.now() };
 });
 
 export const fetchQuotes = createServerFn({ method: "POST" })
@@ -878,17 +929,28 @@ export const buildPonsTrade = createServerFn({ method: "POST" })
       const launch = await lookupPonsLaunch(data.mint);
       if (!launch?.curve) return { ok: false as const, error: "no pons curve for mint" };
       if (!nativePair(launch.pair)) return { ok: false as const, error: "quote is not ETH. paper only." };
-      const [nonceRaw, gasPriceRaw, balRaw] = await rhBatch([
+      const [nonceRaw, gasPriceRaw, balRaw, blockRaw] = await rhBatch([
         { method: "eth_getTransactionCount", params: [data.from, "pending"] },
         { method: "eth_gasPrice", params: [] },
         { method: "eth_getBalance", params: [data.from, "latest"] },
+        { method: "eth_getBlockByNumber", params: ["latest", false] },
       ]);
       const nonce = Number(BigInt(String(nonceRaw ?? "0x0")));
       const gasPrice = BigInt(String(gasPriceRaw ?? "0x1a20a8e0"));
+      const baseFee = (() => {
+        const b = blockRaw && typeof blockRaw === "object" ? (blockRaw as { baseFeePerGas?: string }).baseFeePerGas : null;
+        try {
+          return b ? BigInt(b) : 0n;
+        } catch {
+          return 0n;
+        }
+      })();
+      const floor = baseFee > gasPrice ? baseFee : gasPrice;
+      const padded = floor * 2n + 1_000_000n;
       const bal = BigInt(String(balRaw ?? "0x0"));
       if (data.action === "buy") {
         const quote = LIVE_ETH_WEI;
-        const gasNeed = 250_000n * gasPrice;
+        const gasNeed = 250_000n * padded;
         if (bal < quote + gasNeed) {
           return { ok: false as const, error: "eth hot needs 0.001 plus gas" };
         }
@@ -914,7 +976,7 @@ export const buildPonsTrade = createServerFn({ method: "POST" })
               data: txData,
               value: `0x${quote.toString(16)}`,
               gas: `0x${gas.toString(16)}`,
-              gasPrice: `0x${gasPrice.toString(16)}`,
+              gasPrice: `0x${padded.toString(16)}`,
               nonce,
               chainId: RH_CHAIN_ID,
             },

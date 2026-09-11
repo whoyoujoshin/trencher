@@ -1,6 +1,6 @@
 import { Keypair, VersionedTransaction } from "@solana/web3.js";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { buildLiveTrade, buildPonsTrade, fetchEthBalance, fetchHotBalance, sendSignedEthTx, sendSignedTx } from "./server";
+import { buildLiveTrade, buildPonsTrade, fetchEthBalance, fetchHotBalance, listHotBags, sendSignedEthTx, sendSignedTx, waitEthReceipt } from "./server";
 import { isEvmMint } from "./types";
 
 const KEY = "trencher-wallet-v1";
@@ -11,6 +11,7 @@ const LIVE_MINTS = "trencher-live-mints";
 
 export const LIVE_CAP_SOL = 0.02;
 export const LIVE_CAP_ETH = 0.001;
+export const LIVE_ETH_USD = 2500;
 const ETH_KEY = "trencher-eth-hot-v1";
 
 export function markLiveMint(mint: string) {
@@ -24,12 +25,26 @@ export function markLiveMint(mint: string) {
   }
 }
 
+export function listedLiveMints(): string[] {
+  try {
+    return (JSON.parse(localStorage.getItem(LIVE_MINTS) || "[]") as string[]).filter(Boolean);
+  } catch {
+    return [];
+  }
+}
+
 export function isLiveMint(mint: string): boolean {
   if (!mint) return false;
+  return listedLiveMints().includes(mint);
+}
+
+export function forgetLiveMint(mint: string) {
+  if (!mint) return;
   try {
-    return (JSON.parse(localStorage.getItem(LIVE_MINTS) || "[]") as string[]).includes(mint);
+    const cur = listedLiveMints().filter((m) => m !== mint);
+    localStorage.setItem(LIVE_MINTS, JSON.stringify(cur));
   } catch {
-    return false;
+    /* ignore */
   }
 }
 
@@ -316,31 +331,41 @@ export async function hotBuy(mint: string, symbol: string): Promise<{ ok: boolea
   }
 }
 
-async function signHot(mint: string, action: "buy" | "sell"): Promise<{ ok: boolean; sig?: string; error?: string }> {
+async function signHot(
+  mint: string,
+  action: "buy" | "sell",
+  dump = false,
+): Promise<{ ok: boolean; sig?: string; error?: string }> {
   const kp = loadHotKey();
   if (!kp) return { ok: false, error: "no hot wallet." };
   const pubkey = kp.publicKey.toBase58();
-  const built = await buildLiveTrade({ data: { publicKey: pubkey, mint, action } });
+  const built = await buildLiveTrade({ data: { publicKey: pubkey, mint, action, dump } });
   if (!built.ok) return { ok: false, error: built.error };
   const raw = Uint8Array.from(atob(built.txB64), (c) => c.charCodeAt(0));
   const tx = VersionedTransaction.deserialize(raw);
   tx.sign([kp]);
-  const sent = await sendSignedTx({ data: { txB64: bytesToB64(tx.serialize()) } });
+  const sent = await sendSignedTx({ data: { txB64: bytesToB64(tx.serialize()), confirm: !dump } });
   if (!sent.ok || !sent.sig) return { ok: false, error: sent.error || "send failed" };
   return { ok: true, sig: sent.sig };
 }
 
-export async function hotSell(mint: string, symbol: string): Promise<{ ok: boolean; text: string }> {
-  if (!hotAutoArmed()) return { ok: false, text: "hot auto is off." };
+export async function hotSell(
+  mint: string,
+  symbol: string,
+  force = false,
+): Promise<{ ok: boolean; text: string; hash?: string }> {
+  if (!force && !hotAutoArmed()) return { ok: false, text: "hot auto is off." };
   const kp = loadHotKey();
   if (!kp) return { ok: false, text: "no hot wallet." };
   try {
-    const sent = await signHot(mint, "sell");
+    const sent = await signHot(mint, "sell", force);
     if (!sent.ok || !sent.sig) {
       return { ok: false, text: `HOT sell $${symbol} failed: ${sent.error}` };
     }
+    forgetLiveMint(mint);
     return {
       ok: true,
+      hash: sent.sig,
       text: `HOT SELL · 100% $${symbol} · ${sent.sig.slice(0, 8)}… https://solscan.io/tx/${sent.sig}`,
     };
   } catch (e) {
@@ -460,11 +485,13 @@ async function signAndSendEthSteps(
     }
     if (!sent?.ok || !sent.hash) return { ok: false, error: sent?.error || "eth send failed" };
     last = sent.hash;
+    const receipt = await waitEthReceipt({ data: { hash: last } });
+    if (!receipt.ok) return { ok: false, error: receipt.error || "no receipt" };
   }
   return { ok: true, hash: last };
 }
 
-export async function ethHotBuy(mint: string, symbol: string): Promise<{ ok: boolean; text: string }> {
+export async function ethHotBuy(mint: string, symbol: string): Promise<{ ok: boolean; text: string; hash?: string }> {
   if (!hotAutoArmed()) return { ok: false, text: "hot auto is off." };
   if (!isEvmMint(mint)) return { ok: false, text: "not a pons mint." };
   const hot = peekEthHot();
@@ -487,6 +514,7 @@ export async function ethHotBuy(mint: string, symbol: string): Promise<{ ok: boo
     markLiveMint(mint);
     return {
       ok: true,
+      hash: sent.hash,
       text: `HOT · 0.001 ETH $${symbol} · ${sent.hash.slice(0, 10)}… https://robinhoodchain.blockscout.com/tx/${sent.hash}`,
     };
   } catch (e) {
@@ -494,8 +522,12 @@ export async function ethHotBuy(mint: string, symbol: string): Promise<{ ok: boo
   }
 }
 
-export async function ethHotSell(mint: string, symbol: string): Promise<{ ok: boolean; text: string }> {
-  if (!hotAutoArmed()) return { ok: false, text: "hot auto is off." };
+export async function ethHotSell(
+  mint: string,
+  symbol: string,
+  force = false,
+): Promise<{ ok: boolean; text: string; hash?: string }> {
+  if (!force && !hotAutoArmed()) return { ok: false, text: "hot auto is off." };
   if (!isEvmMint(mint)) return { ok: false, text: "not a pons mint." };
   const hot = peekEthHot();
   if (!hot.address) return { ok: false, text: "no ETH hot." };
@@ -504,11 +536,53 @@ export async function ethHotSell(mint: string, symbol: string): Promise<{ ok: bo
   try {
     const sent = await signAndSendEthSteps(built.steps);
     if (!sent.ok || !sent.hash) return { ok: false, text: `ETH sell failed: ${sent.error}` };
+    forgetLiveMint(mint);
     return {
       ok: true,
+      hash: sent.hash,
       text: `HOT SELL · 100% $${symbol} · ${sent.hash.slice(0, 10)}… https://robinhoodchain.blockscout.com/tx/${sent.hash}`,
     };
   } catch (e) {
     return { ok: false, text: e instanceof Error ? e.message : "eth hot sell failed." };
   }
+}
+
+export async function flattenHot(): Promise<{
+  n: number;
+  sold: number;
+  missed: number;
+  lines: string[];
+}> {
+  const solHot = ensureHot();
+  const ethHot = peekEthHot();
+  let bags: { sol: { mint: string }[]; eth: { mint: string }[] } = { sol: [], eth: [] };
+  try {
+    bags = await listHotBags({ data: { sol: solHot.pubkey, eth: ethHot.address } });
+  } catch {
+    /* fall back to live mints */
+  }
+  const sol = new Set((bags.sol ?? []).map((x) => x.mint));
+  const eth = new Set((bags.eth ?? []).map((x) => x.mint.toLowerCase()));
+  for (const m of listedLiveMints()) {
+    if (isEvmMint(m)) eth.add(m.toLowerCase());
+    else sol.add(m);
+  }
+  const lines: string[] = [];
+  let sold = 0;
+  let missed = 0;
+  for (const mint of sol) {
+    const tag = mint.slice(0, 6);
+    const r = await hotSell(mint, tag, true);
+    lines.push(r.text);
+    if (r.ok) sold += 1;
+    else missed += 1;
+  }
+  for (const mint of eth) {
+    const tag = mint.slice(0, 8);
+    const r = await ethHotSell(mint, tag, true);
+    lines.push(r.text);
+    if (r.ok) sold += 1;
+    else missed += 1;
+  }
+  return { n: sol.size + eth.size, sold, missed, lines };
 }

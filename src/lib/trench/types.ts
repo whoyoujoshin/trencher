@@ -76,6 +76,8 @@ export type Position = {
   slipPct: number;
   feeUsd: number;
   live?: boolean;
+  liveCostUsd?: number;
+  metaSource?: "open" | "local" | "grok";
 };
 
 export type ClosedTrade = {
@@ -96,6 +98,10 @@ export type ClosedTrade = {
   feeUsd: number;
   rail?: Rail;
   peakPct?: number;
+  metaSource?: "open" | "local" | "grok";
+  settled?: "pending" | "yes" | "no";
+  tx?: string;
+  liveCostUsd?: number;
 };
 
 export type LogLine = {
@@ -121,6 +127,20 @@ export type MetaState = {
   drop: string[];
   source: "open" | "local" | "grok";
   updatedAt: number;
+  words?: Record<string, WordStat>;
+  grokTape?: SourceTape;
+  localTape?: SourceTape;
+};
+
+export type WordStat = {
+  n: number;
+  w: number;
+  pnl: number;
+};
+
+export type SourceTape = {
+  n: number;
+  pnl: number;
 };
 
 export type Playbook = {
@@ -129,6 +149,7 @@ export type Playbook = {
   takePct: number;
   socialBias: number;
   bannedCreators: string[];
+  parole?: string[];
 };
 
 export type Lesson = {
@@ -182,6 +203,7 @@ export type Rival = {
   feesPaid: number;
   killed: number;
   callsign: string;
+  dayHits?: number[];
 };
 
 export type LaneId = "vet" | "hatch" | "cub";
@@ -250,7 +272,7 @@ export const AGENTS: {
   { id: "SCOUT", title: "Scout", owns: "The tape. Every new launch.", never: "Never sizes. Never buys." },
   { id: "WARDEN", title: "Warden", owns: "The veto. Then grades it.", never: "Never trades. No beats every score." },
   { id: "SNIPER", title: "Sniper", owns: "Entries. Sizes to the cap.", never: "Never averages. Never enters without an exit." },
-  { id: "RISK", title: "Risk", owns: "Writes the exit first. Tightens after a stop.", never: "Never opens. Never widens a stop." },
+  { id: "RISK", title: "Risk", owns: "Writes the exit first. Tightens after a stop. Eases only on a sample.", never: "Never opens. Never eases a stop on one clip." },
   { id: "TILL", title: "Till", owns: "Fees, the gate, survival.", never: "Never trades. Never skips the gate." },
   { id: "META", title: "Meta", owns: "Weather knobs. Survives the clone.", never: "Never rewrites Warden or spirit." },
 ];
@@ -273,13 +295,19 @@ export const MAX_BUY_SOL = 0.22;
 export const STOP_LOSS = -0.5;
 export const STOP_LOSS_PONS = -0.22;
 export const TAKE_PROFIT = 0.9;
-export const TRAIL_ARM = 0.4;
-export const TRAIL_GIVE = 0.3;
-export const TRAIL_ARM_PONS = 0.45;
-export const TRAIL_GIVE_PONS = 0.18;
+export const TRAIL_ARM = 0.25;
+export const TRAIL_GIVE = 0.16;
+export const TRAIL_ARM_PONS = 0.25;
+export const TRAIL_GIVE_PONS = 0.16;
 export const HARD_TAKE_PONS = 0.85;
-export const GREEN_ARM = 0.12;
+export const GREEN_ARM = 0.08;
 export const GREEN_KEEP = 0.02;
+export const PULSE_MS = 8_000;
+export const PULSE_PEAK = 0.06;
+export const HOT_TRADE_MS = 60_000;
+export const HUNT_MCAP_MIN = 50_000;
+export const HUNT_MCAP_MAX = 400_000;
+export const HOT_MCAP_PONS = HUNT_MCAP_MIN;
 export const MAX_POSITIONS = 3;
 export const BUY_COOLDOWN_MS = 45_000;
 export const BUY_COOLDOWN_PONS_MS = 12_000;

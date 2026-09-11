@@ -22,6 +22,7 @@ import {
   TRAIL_ARM_PONS,
   TRAIL_GIVE_PONS,
   HARD_TAKE_PONS,
+  blankWeather,
   gateUsd,
   isEvmMint,
   type AgentId,
@@ -32,6 +33,7 @@ import {
 } from "@/lib/trench/types";
 import { ageLabel, cn, elapsed, formatPct, formatUsd, shortAddr, vaultPressure } from "@/lib/utils";
 import { ntfyTopic, pingNtfy, setNtfyTopic } from "@/lib/trench/ntfy";
+import { gmgnKey, setGmgnKey } from "@/lib/trench/gmgn";
 import { amHunter, chamberEyes, deskPin, seatCloud, syncCloud, unlockCloud } from "@/lib/trench/cloud";
 import {
   connectWallet,
@@ -48,7 +50,8 @@ import {
   setHotAuto,
   signOneState,
 } from "@/lib/trench/wallet";
-import { blankPlaybook, formatWeather, pickHotLane, pnlPct, positionValue, protectSpec, trailSpec, wardenScore } from "@/lib/trench/logic";
+import { blankPlaybook, clipsInDay, formatWeather, liveFloor, paperFloor, pickHotLane, pnlPct, positionValue, protectSpec, trailSpec, wardenScore } from "@/lib/trench/logic";
+import { hardReload } from "@/lib/error-component";
 
 const ICONS: Record<AgentId, typeof Radio> = {
   SCOUT: Radio,
@@ -106,7 +109,7 @@ class DeskGuard extends Component<{ children: ReactNode }, { err: string | null 
             Render died. The book is still in the browser. Reload the desk — cash and scars stay if they were saved.
           </p>
           <div className="mt-8">
-            <Button size="lg" onClick={() => this.setState({ err: null })}>
+            <Button size="lg" onClick={() => hardReload(true)}>
               Reload the desk
             </Button>
           </div>
@@ -135,6 +138,7 @@ function TrenchInner() {
   const cubLive = !!extra && (extra.status === "alive" || extra.status === "survived");
   const hunting =
     status === "watch" ||
+    status === "dead" ||
     (!vetDead && (status === "alive" || status === "survived")) ||
     hatchLive ||
     cubLive;
@@ -188,7 +192,14 @@ function TrenchInner() {
     const id = window.setInterval(() => {
       void cycle();
     }, ms);
-    return () => window.clearInterval(id);
+    const onVis = () => {
+      if (document.visibilityState === "visible") void cycle();
+    };
+    document.addEventListener("visibilitychange", onVis);
+    return () => {
+      window.clearInterval(id);
+      document.removeEventListener("visibilitychange", onVis);
+    };
   }, [hunting, cycle, cloudRole, tapeVenue]);
 
   const hasCell =
@@ -281,6 +292,48 @@ function BookDock({ compact = false }: { compact?: boolean }) {
   );
 }
 
+function GmgnDock() {
+  const [key, setKey] = useState("");
+  const [armed, setArmed] = useState("");
+  const [msg, setMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    const k = gmgnKey();
+    setKey(k);
+    setArmed(k);
+  }, []);
+
+  function save() {
+    const err = setGmgnKey(key);
+    if (err) {
+      setMsg(err);
+      return;
+    }
+    const k = gmgnKey();
+    setArmed(k);
+    setMsg(k ? "Warden borrowed GMGN eyes." : "GMGN off.");
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <input
+        value={key}
+        onChange={(e) => setKey(e.target.value)}
+        placeholder="GMGN API key"
+        spellCheck={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+        type="password"
+        className="h-9 w-36 border border-line bg-elevated px-2 font-mono text-2xs text-fg placeholder:text-subtle"
+      />
+      <Button size="sm" variant="ghost" onClick={save}>
+        {armed ? "gmgn on" : "Arm GMGN"}
+      </Button>
+      {msg ? <p className="font-mono text-2xs text-subtle">{msg}</p> : null}
+    </div>
+  );
+}
+
 function NtfyDock() {
   const [topic, setTopic] = useState("");
   const [armed, setArmed] = useState("");
@@ -341,6 +394,8 @@ function WalletDock() {
   const storeEth = useTrench((s) => s.hotEth);
   const storeEthAddr = useTrench((s) => s.hotEthAddr);
   const tapeVenue = useTrench((s) => s.tapeVenue);
+  const flattenHot = useTrench((s) => s.flattenHot);
+  const status = useTrench((s) => s.status);
 
   useEffect(() => {
     const h = ensureHot();
@@ -487,6 +542,18 @@ function WalletDock() {
           <Button size="sm" variant={hotAuto ? "primary" : "ghost"} onClick={toggleAuto}>
             {hotAuto ? "HOT AUTO" : "Arm hot auto"}
           </Button>
+          {status !== "watch" ? (
+            <Button
+              size="sm"
+              variant="ghost"
+              onClick={() => {
+                setMsg("flattening leftover bags…");
+                void flattenHot().then(() => setMsg("flatten done. check Till in the log."));
+              }}
+            >
+              Flatten hot
+            </Button>
+          ) : null}
         </>
       ) : null}
       {ethPk ? (
@@ -637,6 +704,18 @@ function WakeScreen({
   const arm = useTrench((s) => s.arm);
   const spectate = useTrench((s) => s.spectate);
   const leaveHome = useTrench((s) => s.leaveHome);
+  const setHydrated = useTrench((s) => s.setHydrated);
+  const [stuck, setStuck] = useState(false);
+
+  useEffect(() => {
+    if (ready) return;
+    const id = window.setTimeout(() => {
+      setHydrated();
+      setStuck(true);
+    }, 1200);
+    return () => window.clearTimeout(id);
+  }, [ready, setHydrated]);
+
   return (
     <main className="relative flex min-h-dvh flex-col justify-between bg-bg px-5 py-8 sm:px-10 sm:py-12">
       <header className="flex items-center justify-between text-muted">
@@ -685,11 +764,17 @@ function WakeScreen({
             </Button>
           ) : null}
           <BookDock />
+          <GmgnDock />
           <CloudDock eyes={eyes} role={role} />
           <p className="font-mono text-2xs leading-relaxed text-subtle">
             Second window is a blank cell. Do not stake. Load the book JSON from Downloads.
             The hunt, Hatch, and hot wallet live in the tab that was already running.
           </p>
+          {stuck ? (
+            <Button size="sm" variant="ghost" onClick={() => hardReload(true)}>
+              Desk stuck. Reload.
+            </Button>
+          ) : null}
         </div>
       </section>
 
@@ -760,6 +845,7 @@ function Desk({
   const vetCash = useTrench((s) => s.cash);
   const vetPositions = useTrench((s) => s.positions);
   const vetClosed = useTrench((s) => s.closed);
+  const vetDayHits = useTrench((s) => s.dayHits);
   const vetLessons = useTrench((s) => s.lessons);
   const vetPlaybook = useTrench((s) => s.playbook) ?? blankPlaybook();
   const vetFees = useTrench((s) => s.feesPaid);
@@ -775,6 +861,7 @@ function Desk({
   const hotEthAddr = useTrench((s) => s.hotEthAddr);
   const logs = useTrench((s) => s.logs);
   const lastHotLine = useTrench((s) => s.lastHotLine);
+  const lastGmgn = useTrench((s) => s.lastGmgn);
   const spiritFloor = useSpirit((s) => s.canon.scoreFloor);
   const round = useTrench((s) => s.round) || 1;
   const roundStartedAt = useTrench((s) => s.roundStartedAt);
@@ -843,6 +930,10 @@ function Desk({
   const eqH = rival ? equityNow(rival.cash, rival.positions) : 0;
   const eqC = extra ? equityNow(extra.cash, extra.positions) : 0;
   const liveCount = (vetLive ? 1 : 0) + (hatchLive ? 1 : 0) + (cubLive ? 1 : 0);
+  const clipsV = clipsInDay(vetDayHits, vetClosed, now);
+  const clipsH = rival ? clipsInDay(rival.dayHits, rival.closed, now) : 0;
+  const clipsC = extra ? clipsInDay(extra.dayHits, extra.closed, now) : 0;
+  const clipsMax = Math.max(clipsV, clipsH, clipsC);
   const cellFull = hatchLive && cubLive;
   const focusSign = cubFocus ? cubSign : hatchFocus ? hatchSign : vetSign;
   const focusCash = cubFocus ? extra?.cash ?? 0 : hatchFocus ? rival?.cash ?? 0 : vetCash;
@@ -904,7 +995,7 @@ function Desk({
                 <span>
                   {vetSign} {vetLive ? (rentPaid ? `rest ${formatUsd(eqV)}` : formatUsd(eqV)) : "dead"}
                 </span>
-                {vetLive ? <BagDots positions={vetPositions} /> : null}
+                <CloneTally open={vetLive ? vetPositions : []} clips={clipsV} hot={clipsMax} />
               </button>
               {rival ? (
                 <button
@@ -918,7 +1009,7 @@ function Desk({
                   <span>
                     {hatchSign} {hatchLive ? (rival.rentPaid ? `rest ${formatUsd(eqH)}` : formatUsd(eqH)) : "dead"}
                   </span>
-                  {hatchLive ? <BagDots positions={rival.positions} /> : null}
+                  <CloneTally open={hatchLive ? rival.positions : []} clips={clipsH} hot={clipsMax} />
                 </button>
               ) : null}
               {extra ? (
@@ -933,7 +1024,7 @@ function Desk({
                   <span>
                     {cubSign} {cubLive ? (extra.rentPaid ? `rest ${formatUsd(eqC)}` : formatUsd(eqC)) : "dead"}
                   </span>
-                  {cubLive ? <BagDots positions={extra.positions} /> : null}
+                  <CloneTally open={cubLive ? extra.positions : []} clips={clipsC} hot={clipsMax} />
                 </button>
               ) : null}
             </div>
@@ -948,6 +1039,8 @@ function Desk({
                   value={vetLive ? formatUsd(eqV) : "dead"}
                   tone={!vetLive ? "loss" : eqV - STARTING_CASH >= 0 ? "gain" : "loss"}
                   dots={vetLive ? vetPositions : []}
+                  clips={clipsV}
+                  clipsHot={clipsMax}
                 />
                 {rival ? (
                   <Stat
@@ -955,6 +1048,8 @@ function Desk({
                     value={hatchLive ? formatUsd(eqH) : "dead"}
                     tone={!hatchLive ? "loss" : eqH - STARTING_CASH >= 0 ? "gain" : "loss"}
                     dots={hatchLive ? rival.positions : []}
+                    clips={clipsH}
+                    clipsHot={clipsMax}
                   />
                 ) : null}
                 {extra ? (
@@ -963,6 +1058,8 @@ function Desk({
                     value={cubLive ? formatUsd(eqC) : "dead"}
                     tone={!cubLive ? "loss" : eqC - STARTING_CASH >= 0 ? "gain" : "loss"}
                     dots={cubLive ? extra.positions : []}
+                    clips={clipsC}
+                    clipsHot={clipsMax}
                   />
                 ) : null}
               </>
@@ -1078,8 +1175,9 @@ function Desk({
               tone={hotAutoArmed() ? "gain" : "warn"}
             />
             <Stat
-              label="Spirit"
-              value={`floor ${spiritFloor ?? "—"}`}
+              label="Live"
+              value={`floor ${liveFloor(playbook, weather ?? blankWeather(), spiritFloor ?? 45)}`}
+              tone="gain"
             />
             <Stat
               label="Addr"
@@ -1101,10 +1199,22 @@ function Desk({
                   (l) =>
                     l.text.includes("HOT ·") ||
                     l.text.includes("HOT SELL") ||
+                    l.text.includes("LIVE veto") ||
                     l.text.includes("SPIRIT veto") ||
                     l.text.startsWith("SIGNED"),
                 )?.text.slice(0, 48) ?? "no live fill yet"
               }
+            />
+            <Stat
+              label="GMGN"
+              value={
+                lastGmgn
+                  ? `$${lastGmgn.symbol} ${lastGmgn.text}`.slice(0, 42)
+                  : gmgnKey()
+                    ? "armed · waiting on a live mint"
+                    : "dark"
+              }
+              tone={lastGmgn?.veto ? "loss" : gmgnKey() ? "gain" : undefined}
             />
             <Stat
               label="Cloud"
@@ -1139,7 +1249,7 @@ function Desk({
             thesis · {meta.thesis}
             {meta.source === "grok" ? " · grok" : meta.source === "local" ? " · local" : ""}
             {` · cell ${round} · gate ${due}`}
-            {" · "}floor {playbook.scoreFloor} paper · spirit {spiritFloor} live
+            {" · "}floor {paperFloor(playbook, weather ?? blankWeather(), spiritFloor ?? 45)} paper · {liveFloor(playbook, weather ?? blankWeather(), spiritFloor ?? 45)} live
             {weather?.at ? ` · META ${formatWeather(weather, tapeVenue)}` : ""}
             {" · "}stop {(playbook.stopPct * 100).toFixed(0)}%
             {" · "}
@@ -1153,11 +1263,17 @@ function Desk({
               return `${trail} · protect +${(green.arm * 100).toFixed(0)}%→+${(green.keep * 100).toFixed(0)}%`;
             })()}
             {playbook.bannedCreators.length ? ` · ${playbook.bannedCreators.length} burned` : ""}
+            {lastGmgn
+              ? ` · gmgn $${lastGmgn.symbol}`
+              : gmgnKey()
+                ? " · gmgn on"
+                : ""}
             {` · ${cubFocus ? cubSign : hatchFocus ? hatchSign : vetSign}`}
             {` · ${rank.label}`}
           </p>
           <BookDock compact />
           <NtfyDock />
+          <GmgnDock />
           <CloudDock eyes={eyes} role={cloudRole} />
           <WalletDock />
           {status !== "watch" && !cellFull && (vetLive || hatchLive || cubLive) ? (
@@ -1285,10 +1401,33 @@ function StatusChip({
   );
 }
 
+function CloneTally({
+  open,
+  clips,
+  hot,
+}: {
+  open: Position[];
+  clips: number;
+  hot: number;
+}) {
+  const busy = hot >= 8 && clips === hot && clips > 0;
+  return (
+    <span className="mt-0.5 flex items-center justify-center gap-1">
+      {open.length ? <BagDots positions={open} /> : null}
+      <span
+        title={`${clips} clips in the last 24 hours`}
+        className={cn("font-mono text-2xs tabular-nums", busy ? "text-warn" : "text-subtle")}
+      >
+        {clips}×
+      </span>
+    </span>
+  );
+}
+
 function BagDots({ positions }: { positions: Position[] }) {
   if (!positions.length) return null;
   return (
-    <span className="mt-0.5 flex items-center justify-center gap-0.5" aria-hidden>
+    <span className="flex items-center justify-center gap-0.5" aria-hidden>
       {positions.map((p) => {
         const pct = pnlPct(p.costUsd, p.entryMcap, p.lastMcap);
         const tone = pct > 0.005 ? "bg-gain" : pct < -0.005 ? "bg-loss" : "bg-muted";
@@ -1309,11 +1448,15 @@ function Stat({
   value,
   tone,
   dots,
+  clips,
+  clipsHot,
 }: {
   label: string;
   value: string;
   tone?: "gain" | "loss" | "warn";
   dots?: Position[];
+  clips?: number;
+  clipsHot?: number;
 }) {
   return (
     <div className="flex flex-col gap-0.5">
@@ -1328,18 +1471,32 @@ function Stat({
       >
         {value}
       </dd>
-      {dots ? <BagDots positions={dots} /> : null}
+      {typeof clips === "number" ? (
+        <CloneTally open={dots ?? []} clips={clips} hot={clipsHot ?? clips} />
+      ) : dots ? (
+        <BagDots positions={dots} />
+      ) : null}
     </div>
   );
 }
 
 function AgentRail() {
   const agents = useTrench((s) => s.agents);
+  const lastGmgn = useTrench((s) => s.lastGmgn);
+  const gmgnArmed = typeof window !== "undefined" && !!gmgnKey();
   return (
     <section className="grid grid-cols-2 border-b border-line sm:grid-cols-3 lg:grid-cols-6">
       {AGENTS.map((a) => {
         const Icon = ICONS[a.id];
         const pulse = agents[a.id];
+        const wardenEye =
+          a.id === "WARDEN"
+            ? lastGmgn
+              ? `GMGN · $${lastGmgn.symbol} ${lastGmgn.text}`
+              : gmgnArmed
+                ? "GMGN armed. waiting on a live mint."
+                : "GMGN dark."
+            : a.never;
         return (
           <article key={a.id} className="border-b border-r border-line px-4 py-3">
             <div className="flex items-center gap-2 text-muted">
@@ -1349,7 +1506,18 @@ function AgentRail() {
             <p className="mt-2 line-clamp-2 min-h-8 text-xs leading-snug text-fg">
               {pulse?.lastText ?? "asleep"}
             </p>
-            <p className="mt-1 line-clamp-1 text-micro text-subtle">{a.never}</p>
+            <p
+              className={cn(
+                "mt-1 line-clamp-1 text-micro",
+                a.id === "WARDEN" && lastGmgn?.veto
+                  ? "text-loss"
+                  : a.id === "WARDEN" && gmgnArmed
+                    ? "text-gain"
+                    : "text-subtle",
+              )}
+            >
+              {wardenEye}
+            </p>
           </article>
         );
       })}

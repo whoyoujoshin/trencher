@@ -37,12 +37,28 @@ function isHot(t: { rail?: Rail }): boolean {
   return t.rail === "sol" || t.rail === "eth";
 }
 
+function walletPnl(t: ClosedTrade): number | null {
+  if (typeof t.liveCostUsd !== "number" || t.liveCostUsd <= 0) return null;
+  return Math.round(t.liveCostUsd * t.pnlPct * 100) / 100;
+}
+
+function settleTag(t: ClosedTrade): { tag: string; tone: string } {
+  if (t.rail !== "sol" && t.rail !== "eth") return { tag: "paper", tone: "text-subtle" };
+  if (t.settled === "yes") return { tag: "in wallet", tone: "text-gain" };
+  if (t.settled === "no") return { tag: "sell missed", tone: "text-loss" };
+  if (t.settled === "pending") return { tag: "selling…", tone: "text-warn" };
+  return { tag: "booked only", tone: "text-warn" };
+}
+
 export function HotBlotter() {
   const closed = useTrench((s) => s.closed);
   const rival = useTrench((s) => s.rival);
   const extra = useTrench((s) => s.extra);
   const callsign = useTrench((s) => s.callsign);
+  const flattenHot = useTrench((s) => s.flattenHot);
+  const status = useTrench((s) => s.status);
   const [rail, setRail] = useState<"hot" | "all">("hot");
+  const [flatMsg, setFlatMsg] = useState<string | null>(null);
 
   const rows = useMemo(() => {
     const pack: Row[] = [
@@ -66,7 +82,11 @@ export function HotBlotter() {
   const hot = rows.filter(isHot);
   const n = hot.length;
   const wins = hot.filter((t) => t.pnlUsd > 0).length;
-  const pnl = hot.reduce((s, t) => s + t.pnlUsd, 0);
+  const wallet = hot.reduce((s, t) => {
+    if (t.settled !== "yes") return s;
+    return s + (walletPnl(t) ?? 0);
+  }, 0);
+  const pending = hot.filter((t) => t.settled === "pending" || t.settled === "no").length;
   const gave = hot.filter((t) => missOf(t).tag.startsWith("gave")).length;
   const never = hot.filter((t) => missOf(t).tag === "never ran").length;
 
@@ -86,17 +106,21 @@ export function HotBlotter() {
           </Link>
         </div>
         <p className="mt-3 max-w-2xl text-sm leading-relaxed text-muted text-pretty">
-          Live SOL and ETH fills. Peak is the high while the clip was open. Fill is where
-          RISK booked it. The gap is what we missed.
+          Desk $ is the paper clip. Wallet $ is the live 0.02 SOL / 0.001 ETH clip, and only
+          after the sell lands. If it says selling or sell missed, the tokens are still in
+          the hot wallet — TILL keeps retrying.
         </p>
         <div className="mt-4 flex flex-wrap gap-3 font-mono text-2xs text-muted">
           <span>{n} hot clips</span>
           <span>win {n ? Math.round((wins / n) * 100) : 0}%</span>
-          <span className={pnl >= 0 ? "text-gain" : "text-loss"}>{formatUsd(pnl)}</span>
+          <span className={wallet >= 0 ? "text-gain" : "text-loss"}>
+            wallet {formatUsd(wallet)}
+          </span>
+          <span>{pending} not settled</span>
           <span>{gave} gave back</span>
           <span>{never} never ran</span>
         </div>
-        <div className="mt-3 flex gap-2">
+        <div className="mt-3 flex flex-wrap items-center gap-2">
           <button
             type="button"
             onClick={() => setRail("hot")}
@@ -111,7 +135,20 @@ export function HotBlotter() {
           >
             include paper
           </button>
+          {status !== "watch" ? (
+            <button
+              type="button"
+              onClick={() => {
+                setFlatMsg("flattening leftover bags…");
+                void flattenHot().then(() => setFlatMsg("flatten sent. check Till."));
+              }}
+              className="ml-auto font-mono text-2xs text-warn uppercase hover:text-fg"
+            >
+              Flatten leftover bags
+            </button>
+          ) : null}
         </div>
+        {flatMsg ? <p className="mt-2 font-mono text-2xs text-subtle">{flatMsg}</p> : null}
       </header>
 
       <div className="overflow-x-auto px-4 py-4 sm:px-6">
@@ -129,9 +166,11 @@ export function HotBlotter() {
                 <th className="py-2 pr-3 font-normal">fill</th>
                 <th className="py-2 pr-3 font-normal">peak</th>
                 <th className="py-2 pr-3 font-normal">missed</th>
-                <th className="py-2 pr-3 font-normal">$</th>
+                <th className="py-2 pr-3 font-normal">desk $</th>
+                <th className="py-2 pr-3 font-normal">wallet $</th>
                 <th className="py-2 pr-3 font-normal">why</th>
                 <th className="py-2 pr-3 font-normal">held</th>
+                <th className="py-2 pr-3 font-normal">settle</th>
                 <th className="py-2 font-normal">read</th>
               </tr>
             </thead>
@@ -140,6 +179,8 @@ export function HotBlotter() {
                 const miss = missOf(t);
                 const peak = typeof t.peakPct === "number" ? t.peakPct : null;
                 const left = peak != null ? peak - t.pnlPct : null;
+                const bag = walletPnl(t);
+                const settle = settleTag(t);
                 return (
                   <tr key={`${t.mint}-${t.closedAt}-${t.lane}`} className="border-t border-line">
                     <td className="py-2 pr-3 font-mono text-2xs text-fg">${t.symbol}</td>
@@ -161,8 +202,33 @@ export function HotBlotter() {
                     >
                       {formatUsd(t.pnlUsd)}
                     </td>
+                    <td
+                      className={`py-2 pr-3 font-mono text-2xs ${
+                        t.settled === "yes" ? "text-gain" : "text-subtle"
+                      }`}
+                    >
+                      {bag == null ? "—" : formatUsd(bag)}
+                    </td>
                     <td className="py-2 pr-3 font-mono text-2xs text-muted">{t.reason}</td>
                     <td className="py-2 pr-3 font-mono text-2xs text-subtle">{hold(t.heldMs)}</td>
+                    <td className={`py-2 pr-3 font-mono text-2xs ${settle.tone}`}>
+                      {t.tx ? (
+                        <a
+                          href={
+                            t.rail === "eth"
+                              ? `https://robinhoodchain.blockscout.com/tx/${t.tx}`
+                              : `https://solscan.io/tx/${t.tx}`
+                          }
+                          target="_blank"
+                          rel="noreferrer"
+                          className="underline decoration-line hover:text-fg"
+                        >
+                          {settle.tag}
+                        </a>
+                      ) : (
+                        settle.tag
+                      )}
+                    </td>
                     <td className={`py-2 font-mono text-2xs ${miss.tone}`}>{miss.tag}</td>
                   </tr>
                 );

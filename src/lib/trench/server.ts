@@ -1,5 +1,5 @@
 import { createServerFn } from "@tanstack/react-start";
-import { isEvmMint, type PumpCoin } from "./types";
+import { HUNT_MCAP_MIN, isEvmMint, type PumpCoin } from "./types";
 
 const PUMP = "https://frontend-api-v3.pump.fun";
 const RH_RPCS = [
@@ -305,7 +305,7 @@ function packPons(coins: PumpCoin[], ethUsd: number): Extract<PonsTape, { ok: tr
   return {
     ok: true,
     newest,
-    traded: newest.filter((c) => c.usdMcap >= 2500).slice(0, 16),
+    traded: newest.filter((c) => c.usdMcap >= HUNT_MCAP_MIN).slice(0, 16),
     solUsd: ethUsd,
   };
 }
@@ -429,7 +429,7 @@ function mcapFromCurve(quoteUsd: number, remaining: number, supply: number): num
   const sold = Math.max(0, supply - remaining);
   const mcap =
     sold > supply * 0.001 ? (quoteUsd / sold) * supply : Math.max(1500, quoteUsd * 60);
-  if (!Number.isFinite(mcap) || mcap <= 0 || mcap > 90_000) return 0;
+  if (!Number.isFinite(mcap) || mcap <= 0 || mcap > 400_000) return 0;
   return Math.round(mcap);
 }
 
@@ -997,8 +997,8 @@ export const buildPonsTrade = createServerFn({ method: "POST" })
             to: data.mint,
             data: approve,
             value: "0x0",
-            gas: "0x186a0",
-            gasPrice: `0x${gasPrice.toString(16)}`,
+            gas: "0x30d40",
+            gasPrice: `0x${padded.toString(16)}`,
             nonce,
             chainId: RH_CHAIN_ID,
           },
@@ -1006,8 +1006,8 @@ export const buildPonsTrade = createServerFn({ method: "POST" })
             to: launch.curve,
             data: sell,
             value: "0x0",
-            gas: "0x493e0",
-            gasPrice: `0x${gasPrice.toString(16)}`,
+            gas: "0x7a120",
+            gasPrice: `0x${padded.toString(16)}`,
             nonce: nonce + 1,
             chainId: RH_CHAIN_ID,
           },
@@ -1051,6 +1051,48 @@ export const sendSignedEthTx = createServerFn({ method: "POST" })
       }
     }
     return { ok: false as const, error: last.slice(0, 180), hash: null };
+  });
+
+export const waitEthReceipt = createServerFn({ method: "POST" })
+  .validator((input: { hash: string }) => ({
+    hash: String(input.hash ?? "").slice(0, 80),
+  }))
+  .handler(async ({ data }) => {
+    const hash = data.hash.startsWith("0x") ? data.hash : `0x${data.hash}`;
+    if (hash.length < 66) return { ok: false as const, error: "bad hash", status: null as string | null };
+    const deadline = Date.now() + 22_000;
+    let last = "no receipt";
+    while (Date.now() < deadline) {
+      for (let i = 0; i < RH_RPCS.length; i++) {
+        const url = RH_RPCS[(rhRpcIndex + i) % RH_RPCS.length]!;
+        try {
+          const res = await fetch(url, {
+            method: "POST",
+            headers: { "content-type": "application/json", "user-agent": "trencher-desk/1.0" },
+            body: JSON.stringify({
+              jsonrpc: "2.0",
+              id: 1,
+              method: "eth_getTransactionReceipt",
+              params: [hash],
+            }),
+            signal: AbortSignal.timeout(8_000),
+          });
+          const j = (await res.json()) as {
+            result?: { status?: string } | null;
+            error?: { message?: string };
+          };
+          if (j.result && typeof j.result.status === "string") {
+            if (j.result.status === "0x1") return { ok: true as const, status: "1", error: null as string | null };
+            return { ok: false as const, error: "tx reverted", status: "0" };
+          }
+          last = j.error?.message || "pending";
+        } catch (e) {
+          last = e instanceof Error ? e.message : "rpc fail";
+        }
+      }
+      await new Promise((r) => setTimeout(r, 700));
+    }
+    return { ok: false as const, error: last.slice(0, 180), status: null };
   });
 
 export const consultMeta = createServerFn({ method: "POST" })
@@ -1112,10 +1154,11 @@ export const consultMeta = createServerFn({ method: "POST" })
   });
 
 export const buildLiveTrade = createServerFn({ method: "POST" })
-  .validator((input: { publicKey: string; mint: string; action?: string }) => ({
+  .validator((input: { publicKey: string; mint: string; action?: string; dump?: boolean }) => ({
     publicKey: String(input.publicKey ?? "").slice(0, 64),
     mint: String(input.mint ?? "").slice(0, 64),
     action: input.action === "sell" ? "sell" : "buy",
+    dump: !!input.dump,
   }))
   .handler(async ({ data }) => {
     if (isEvmMint(data.mint)) {
@@ -1133,9 +1176,9 @@ export const buildLiveTrade = createServerFn({ method: "POST" })
               mint: data.mint,
               denominatedInSol: "false",
               amount: "100%",
-              slippage: 25,
-              priorityFee: 0.0002,
-              pool: "pump",
+              slippage: data.dump ? 50 : 25,
+              priorityFee: data.dump ? 0.0005 : 0.0002,
+              pool: data.dump ? "auto" : "pump",
             }
           : {
               publicKey: data.publicKey,
@@ -1169,9 +1212,44 @@ const SEND_RPCS = [
   "https://rpc.ankr.com/solana",
 ];
 
+async function confirmSolSig(url: string, sig: string): Promise<{ ok: boolean; error: string }> {
+  const deadline = Date.now() + 18_000;
+  let last = "unconfirmed";
+  while (Date.now() < deadline) {
+    try {
+      const res = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "getSignatureStatuses",
+          params: [[sig], { searchTransactionHistory: true }],
+        }),
+        signal: AbortSignal.timeout(8_000),
+      });
+      const j = (await res.json()) as {
+        result?: { value?: Array<{ err?: unknown; confirmationStatus?: string } | null> };
+        error?: { message?: string };
+      };
+      const st = j.result?.value?.[0];
+      if (st?.err) return { ok: false, error: "on-chain err" };
+      if (st && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized" || st.confirmationStatus === "processed")) {
+        return { ok: true, error: "" };
+      }
+      last = j.error?.message || "pending";
+    } catch (e) {
+      last = e instanceof Error ? e.message : "rpc fail";
+    }
+    await new Promise((r) => setTimeout(r, 700));
+  }
+  return { ok: false, error: last };
+}
+
 export const sendSignedTx = createServerFn({ method: "POST" })
-  .validator((input: { txB64: string }) => ({
+  .validator((input: { txB64: string; confirm?: boolean }) => ({
     txB64: String(input.txB64 ?? "").slice(0, 8000),
+    confirm: input.confirm !== false,
   }))
   .handler(async ({ data }) => {
     if (data.txB64.length < 32) return { ok: false as const, error: "empty tx", sig: null as string | null };
@@ -1193,7 +1271,14 @@ export const sendSignedTx = createServerFn({ method: "POST" })
         });
         const j = (await res.json()) as { result?: string; error?: { message?: string; code?: number } };
         if (typeof j.result === "string" && j.result.length > 20) {
-          return { ok: true as const, sig: j.result, error: null as string | null };
+          const sig = j.result;
+          if (!data.confirm) return { ok: true as const, sig, error: null as string | null };
+          const landed = await confirmSolSig(url, sig);
+          if (!landed.ok) {
+            last = landed.error;
+            continue;
+          }
+          return { ok: true as const, sig, error: null as string | null };
         }
         last = j.error?.message || `http ${res.status}`;
       } catch (e) {
@@ -1201,4 +1286,318 @@ export const sendSignedTx = createServerFn({ method: "POST" })
       }
     }
     return { ok: false as const, error: last.slice(0, 180), sig: null };
+  });
+
+const WSOL = "So11111111111111111111111111111111111111112";
+const SKIP_ETH = new Set([RH_WETH.toLowerCase(), PONS_USDG.toLowerCase()]);
+
+export const listHotBags = createServerFn({ method: "POST" })
+  .validator((input: { sol?: string; eth?: string }) => ({
+    sol: String(input.sol ?? "").slice(0, 64),
+    eth: String(input.eth ?? "").slice(0, 42).toLowerCase(),
+  }))
+  .handler(async ({ data }) => {
+    const sol: { mint: string; amount: number }[] = [];
+    const eth: { mint: string; amount: string }[] = [];
+    if (data.sol.length >= 32) {
+      const programs = [
+        "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+        "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+      ];
+      for (const url of SEND_RPCS) {
+        let hit = false;
+        for (const programId of programs) {
+          try {
+            const res = await fetch(url, {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                jsonrpc: "2.0",
+                id: 1,
+                method: "getTokenAccountsByOwner",
+                params: [data.sol, { programId }, { encoding: "jsonParsed" }],
+              }),
+              signal: AbortSignal.timeout(12_000),
+            });
+            const j = (await res.json()) as {
+              result?: {
+                value?: Array<{
+                  account?: {
+                    data?: {
+                      parsed?: { info?: { mint?: string; tokenAmount?: { uiAmount?: number } } };
+                    };
+                  };
+                }>;
+              };
+            };
+            const rows = j.result?.value ?? [];
+            if (rows.length) hit = true;
+            for (const row of rows) {
+              const info = row.account?.data?.parsed?.info;
+              const mint = info?.mint ?? "";
+              const amt = info?.tokenAmount?.uiAmount ?? 0;
+              if (!mint || mint === WSOL || amt <= 0) continue;
+              if (!sol.some((x) => x.mint === mint)) sol.push({ mint, amount: amt });
+            }
+          } catch {
+            /* next */
+          }
+        }
+        if (hit) break;
+      }
+    }
+    if (isEvmMint(data.eth)) {
+      try {
+        const res = await fetch(
+          `https://robinhoodchain.blockscout.com/api/v2/addresses/${data.eth}/tokens?type=ERC-20`,
+          { signal: AbortSignal.timeout(12_000), headers: { accept: "application/json" } },
+        );
+        const j = (await res.json()) as {
+          items?: Array<{
+            value?: string;
+            token?: { address?: string; address_hash?: string };
+          }>;
+        };
+        for (const item of j.items ?? []) {
+          const mint = (item.token?.address_hash || item.token?.address || "").toLowerCase();
+          const val = item.value ?? "0";
+          if (!mint || SKIP_ETH.has(mint) || val === "0") continue;
+          eth.push({ mint, amount: val });
+        }
+      } catch {
+        /* leave empty */
+      }
+    }
+    return { ok: true as const, sol, eth };
+  });
+
+const GMGN_HOST = "https://openapi.gmgn.ai";
+const gmgnCache = new Map<string, { at: number; snap: ReturnType<typeof parseGmgnSnap> }>();
+const GMGN_TTL = 90_000;
+
+function ratio(v: unknown): number | undefined {
+  if (typeof v === "number" && Number.isFinite(v)) return v > 1 ? v / 100 : v;
+  if (typeof v === "string" && v.trim()) {
+    const n = Number(v);
+    if (!Number.isFinite(n)) return undefined;
+    return n > 1 ? n / 100 : n;
+  }
+  return undefined;
+}
+
+function parseGmgnSnap(raw: unknown): {
+  isHoneypot?: string;
+  sellTax?: number;
+  buyTax?: number;
+  top10?: number;
+  rugRatio?: number;
+} | null {
+  if (!raw || typeof raw !== "object") return null;
+  const root = raw as Record<string, unknown>;
+  const data =
+    root.data && typeof root.data === "object"
+      ? (root.data as Record<string, unknown>)
+      : root;
+  const honey = data.is_honeypot ?? data.isHoneypot;
+  return {
+    isHoneypot: typeof honey === "string" ? honey : honey === true ? "yes" : honey === false ? "no" : undefined,
+    sellTax: ratio(data.sell_tax ?? data.sellTax),
+    buyTax: ratio(data.buy_tax ?? data.buyTax),
+    top10: ratio(data.top_10_holder_rate ?? data.top10HolderRate ?? data.top_10_holder_percent),
+    rugRatio: ratio(data.rug_ratio ?? data.rugRatio),
+  };
+}
+
+export const probeGmgn = createServerFn({ method: "POST" })
+  .validator((input: { mint: string; key?: string; chain?: string }) => ({
+    mint: String(input.mint ?? "").slice(0, 80),
+    key: String(input.key ?? "").slice(0, 220),
+    chain: input.chain === "robinhood" ? "robinhood" : "sol",
+  }))
+  .handler(async ({ data }) => {
+    const key = data.key || String(process.env.GMGN_API_KEY ?? "").trim();
+    if (!key) return { ok: false as const, error: "no key", snap: null };
+    if (data.mint.length < 32) return { ok: false as const, error: "bad mint", snap: null };
+    const hit = gmgnCache.get(data.mint);
+    if (hit && Date.now() - hit.at < GMGN_TTL) {
+      return { ok: true as const, error: null as string | null, snap: hit.snap };
+    }
+    try {
+      const qs = new URLSearchParams({
+        chain: data.chain,
+        address: data.mint,
+        timestamp: String(Math.floor(Date.now() / 1000)),
+        client_id: crypto.randomUUID(),
+      });
+      const res = await fetch(`${GMGN_HOST}/v1/token/security?${qs}`, {
+        method: "GET",
+        headers: {
+          "X-APIKEY": key,
+          accept: "application/json",
+        },
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (res.status === 401 || res.status === 403) {
+        return { ok: false as const, error: "bad key", snap: null };
+      }
+      if (res.status === 429) {
+        return { ok: false as const, error: "gmgn rate", snap: null };
+      }
+      if (!res.ok) {
+        return { ok: false as const, error: `gmgn ${res.status}`, snap: null };
+      }
+      const json: unknown = await res.json();
+      const snap = parseGmgnSnap(json);
+      gmgnCache.set(data.mint, { at: Date.now(), snap });
+      return { ok: true as const, error: null as string | null, snap };
+    } catch (e) {
+      return {
+        ok: false as const,
+        error: e instanceof Error ? e.message.slice(0, 80) : "gmgn dark",
+        snap: null,
+      };
+    }
+  });
+
+const GMGN_PUMP_PADS = new Set([
+  "pump.fun",
+  "pump_mayhem",
+  "pump_mayhem_agent",
+  "pump_agent",
+  "pump",
+]);
+const GMGN_QUOTE: Record<string, number[]> = {
+  sol: [4, 5, 3, 1, 13, 0],
+  robinhood: [11, 20, 24, 12, 0],
+};
+let gmgnTapeCache: { at: number; chain: string; coins: PumpCoin[] } | null = null;
+const GMGN_TAPE_TTL = 2_500;
+
+function gmgnMs(v: unknown): number {
+  const n = num(v);
+  if (n <= 0) return Date.now();
+  return n < 1e12 ? n * 1000 : n;
+}
+
+function coinFromGmgn(row: RawCoin, chain: "sol" | "robinhood"): PumpCoin | null {
+  const mint = str(row.address) || str(row.mint);
+  if (!mint) return null;
+  const pad = str(row.launchpad_platform) || str(row.exchange);
+  if (chain === "sol" && pad && !GMGN_PUMP_PADS.has(pad.toLowerCase())) return null;
+  const usdMcap = num(row.usd_market_cap) || num(row.market_cap);
+  const createdAt = gmgnMs(row.created_timestamp ?? row.creation_timestamp);
+  const liveish = num(row.swaps_1m) > 0 || num(row.volume_1h) > 0;
+  return {
+    mint,
+    name: str(row.name) || "unnamed",
+    symbol: str(row.symbol) || "???",
+    description: str(row.description),
+    image: str(row.logo) || str(row.image) || null,
+    creator: str(row.creator),
+    createdAt,
+    usdMcap,
+    solMcap: usdMcap > 0 ? usdMcap / 140 : 0,
+    replyCount: 0,
+    complete: Boolean(row.complete) || num(row.complete_timestamp) > 0,
+    nsfw: false,
+    banned: false,
+    live: liveish,
+    twitter: str(row.twitter) || null,
+    telegram: str(row.telegram) || null,
+    website: str(row.website) || null,
+    username: null,
+    lastTradeAt: liveish ? Date.now() : createdAt,
+    athMcap: num(row.ath_market_cap) || usdMcap,
+    venue: chain === "robinhood" ? "pons" : "pump",
+  };
+}
+
+export const fetchGmgnTape = createServerFn({ method: "POST" })
+  .validator((input: { key?: string; chain?: string }) => ({
+    key: String(input.key ?? "").slice(0, 220),
+    chain: input.chain === "robinhood" ? "robinhood" : "sol",
+  }))
+  .handler(async ({ data }) => {
+    const key = data.key || String(process.env.GMGN_API_KEY ?? "").trim();
+    if (!key) return { ok: false as const, error: "no key", coins: [] as PumpCoin[] };
+    if (gmgnTapeCache && gmgnTapeCache.chain === data.chain && Date.now() - gmgnTapeCache.at < GMGN_TAPE_TTL) {
+      return { ok: true as const, error: null as string | null, coins: gmgnTapeCache.coins };
+    }
+    try {
+      const qs = new URLSearchParams({
+        chain: data.chain,
+        timestamp: String(Math.floor(Date.now() / 1000)),
+        client_id: crypto.randomUUID(),
+      });
+      const body = {
+        version: "v2",
+        new_creation: {
+          filters: ["offchain", "onchain"],
+          launchpad_platform_v2: true,
+          limit: 80,
+          quote_address_type: GMGN_QUOTE[data.chain] ?? [],
+        },
+        near_completion: {
+          filters: ["offchain", "onchain"],
+          launchpad_platform_v2: true,
+          limit: 40,
+          quote_address_type: GMGN_QUOTE[data.chain] ?? [],
+        },
+        completed: {
+          filters: ["offchain", "onchain"],
+          launchpad_platform_v2: true,
+          limit: 40,
+          quote_address_type: GMGN_QUOTE[data.chain] ?? [],
+        },
+      };
+      const res = await fetch(`${GMGN_HOST}/v1/trenches?${qs}`, {
+        method: "POST",
+        headers: {
+          "X-APIKEY": key,
+          accept: "application/json",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(8_000),
+      });
+      if (res.status === 401 || res.status === 403) {
+        return { ok: false as const, error: "bad key", coins: [] as PumpCoin[] };
+      }
+      if (res.status === 429) {
+        return { ok: false as const, error: "gmgn rate", coins: [] as PumpCoin[] };
+      }
+      if (!res.ok) {
+        return { ok: false as const, error: `gmgn ${res.status}`, coins: [] as PumpCoin[] };
+      }
+      const json = (await res.json()) as {
+        code?: number;
+        data?: { new_creation?: RawCoin[]; pump?: RawCoin[]; completed?: RawCoin[] };
+        message?: string;
+      };
+      if (json.code != null && json.code !== 0) {
+        return { ok: false as const, error: json.message || "gmgn trenches", coins: [] as PumpCoin[] };
+      }
+      const rows = [
+        ...(json.data?.new_creation ?? []),
+        ...(json.data?.pump ?? []),
+        ...(json.data?.completed ?? []),
+      ];
+      const coins: PumpCoin[] = [];
+      const seen = new Set<string>();
+      for (const row of rows) {
+        if (!row || typeof row !== "object") continue;
+        const c = coinFromGmgn(row, data.chain === "robinhood" ? "robinhood" : "sol");
+        if (!c || seen.has(c.mint)) continue;
+        seen.add(c.mint);
+        coins.push(c);
+      }
+      gmgnTapeCache = { at: Date.now(), chain: data.chain, coins };
+      return { ok: true as const, error: null as string | null, coins };
+    } catch (e) {
+      return {
+        ok: false as const,
+        error: e instanceof Error ? e.message.slice(0, 80) : "gmgn dark",
+        coins: [] as PumpCoin[],
+      };
+    }
   });

@@ -1,5 +1,5 @@
-import { blankWeather, cellHeat, FEE_RATE, FLAT_AFTER_MS, GRADE_AFTER_MS, GREEN_ARM, GREEN_KEEP, HARD_TAKE_PONS, MAX_BUY_SOL, SCORE_FLOOR, STOP_LOSS, STOP_LOSS_PONS, TAKE_PROFIT, TRAIL_ARM, TRAIL_ARM_PONS, TRAIL_GIVE, TRAIL_GIVE_PONS, WEATHER_COOLDOWN_MS } from "./types";
-import type { ClosedTrade, KillGrade, KillKind, KillRecord, LaneId, Lesson, MetaState, Playbook, PumpCoin, SellReason, TapeHeat, TapePrint, TapeVenue, Weather, WeatherKind } from "./types";
+import { blankWeather, cellHeat, FEE_RATE, FLAT_AFTER_MS, GRADE_AFTER_MS, GREEN_ARM, GREEN_KEEP, HARD_TAKE_PONS, HOT_TRADE_MS, HUNT_MCAP_MAX, HUNT_MCAP_MIN, isEvmMint, MAX_BUY_SOL, PULSE_MS, PULSE_PEAK, SCORE_FLOOR, STOP_LOSS, STOP_LOSS_PONS, TAKE_PROFIT, TRAIL_ARM, TRAIL_ARM_PONS, TRAIL_GIVE, TRAIL_GIVE_PONS, WEATHER_COOLDOWN_MS } from "./types";
+import type { ClosedTrade, KillGrade, KillKind, KillRecord, LaneId, Lesson, MetaState, Playbook, PumpCoin, SellReason, SourceTape, TapeHeat, TapePrint, TapeVenue, Weather, WeatherKind, WordStat } from "./types";
 
 export const CLUSTERS: Record<string, string[]> = {
   stocks: [
@@ -37,6 +37,7 @@ export function blankPlaybook(): Playbook {
     takePct: TAKE_PROFIT,
     socialBias: 0,
     bannedCreators: [],
+    parole: [],
   };
 }
 
@@ -48,6 +49,7 @@ export function climbPlaybook(book: Playbook): Playbook {
     scoreFloor: Math.min(78, book.scoreFloor + 3),
     stopPct: stop,
     bannedCreators: [...book.bannedCreators],
+    parole: [...(book.parole ?? [])],
   };
 }
 
@@ -60,21 +62,26 @@ export function heatPlaybook(book: Playbook, round: number, shift = 0): Playbook
     scoreFloor: Math.min(78, Math.max(32, book.scoreFloor + heat + shift)),
     stopPct: stop,
     bannedCreators: [...book.bannedCreators],
+    parole: [...(book.parole ?? [])],
   };
 }
 
 export function cheapKill(coin: PumpCoin, now: number): string | null {
   if (coin.banned || coin.nsfw) return "banned or flagged. not touching it.";
   const pons = coin.venue === "pons";
-  if (coin.complete && !pons) return "already off the curve. too late.";
+  if (coin.complete && !pons && coin.usdMcap < HUNT_MCAP_MIN) {
+    return "already off the curve. too late.";
+  }
   if (!coin.symbol.trim() || coin.symbol.length > 14) return "ticker is garbage.";
   if (coin.name.trim().length < 2) return "nameless. skip.";
   const age = now - coin.createdAt;
-  if (age > (pons ? 6 * 60 * 60_000 : 45 * 60_000)) {
-    return pons ? "older than 6h. not a snipe." : "older than 45m. not a snipe.";
+  if (age > (pons ? 24 * 60 * 60_000 : 12 * 60 * 60_000)) {
+    return pons ? "older than 24h. not a snipe." : "older than 12h. not a snipe.";
   }
-  if (coin.usdMcap > 90_000) return `mcap ${Math.round(coin.usdMcap)} already. missed.`;
-  if (coin.usdMcap > 0 && coin.usdMcap < (pons ? 400 : 700)) return "empty curve. nothing there.";
+  if (coin.usdMcap > HUNT_MCAP_MAX) return `mcap ${Math.round(coin.usdMcap)} already. missed.`;
+  if (coin.usdMcap > 0 && coin.usdMcap < HUNT_MCAP_MIN) {
+    return `mcap under ${Math.round(HUNT_MCAP_MIN / 1000)}k. waiting on size.`;
+  }
   if (/^\d+$/.test(coin.symbol)) return "numeric ticker. usually a bundle.";
   return null;
 }
@@ -110,16 +117,16 @@ export function setupMatch(coin: PumpCoin, meta: MetaState, now: number): string
     (coin.lastTradeAt != null && now - coin.lastTradeAt < 60_000);
 
   if (coin.venue === "pons") {
-    if (coin.usdMcap < 1500) return "mcap under 1.5k. no tape.";
-    if (coin.usdMcap > 55_000) return "already extended. no chase.";
-    if (age > 4 * 60 * 60_000 && !lively) return "stale and quiet.";
+    if (coin.usdMcap < HUNT_MCAP_MIN) return `mcap under ${Math.round(HUNT_MCAP_MIN / 1000)}k. no tape.`;
+    if (coin.usdMcap > HUNT_MCAP_MAX) return "already extended. no chase.";
+    if (age > 12 * 60 * 60_000 && !lively) return "stale and quiet.";
     if (coin.symbol === "???" || coin.name === "unnamed") return "unnamed. waiting on the mint.";
     return null;
   }
 
-  if (coin.usdMcap < 2500) return "mcap under 2.5k. no tape.";
-  if (coin.usdMcap > 55_000) return "already extended. no chase.";
-  if (age > 20 * 60_000 && !lively) return "stale and quiet.";
+  if (coin.usdMcap < HUNT_MCAP_MIN) return `mcap under ${Math.round(HUNT_MCAP_MIN / 1000)}k. no tape.`;
+  if (coin.usdMcap > HUNT_MCAP_MAX) return "already extended. no chase.";
+  if (age > 6 * 60 * 60_000 && !lively) return "stale and quiet.";
 
   if (meta.source !== "open" && meta.keywords.length) {
     if (!matchesAny(text, meta.keywords)) {
@@ -132,6 +139,29 @@ export function setupMatch(coin: PumpCoin, meta: MetaState, now: number): string
     if (!quality && coin.usdMcap < 10_000) {
       return "no socials, no replies, thin book.";
     }
+  }
+  return null;
+}
+
+export function hotLiveBlock(
+  coin: Pick<PumpCoin, "mint" | "symbol" | "usdMcap" | "lastTradeAt" | "venue">,
+  now: number,
+): string | null {
+  const pons = coin.venue === "pons" || isEvmMint(coin.mint);
+  if (pons) {
+    if (coin.usdMcap < HUNT_MCAP_MIN) {
+      return `live skip $${coin.symbol} — mcap ${Math.round(coin.usdMcap)} under ${HUNT_MCAP_MIN}. paper only.`;
+    }
+    if (coin.usdMcap > HUNT_MCAP_MAX) {
+      return `live skip $${coin.symbol} — mcap ${Math.round(coin.usdMcap)} outside the window. paper only.`;
+    }
+    return null;
+  }
+  if (coin.usdMcap < HUNT_MCAP_MIN || coin.usdMcap > HUNT_MCAP_MAX) {
+    return `live skip $${coin.symbol} — mcap ${Math.round(coin.usdMcap)} outside the window. paper only.`;
+  }
+  if (coin.lastTradeAt == null || now - coin.lastTradeAt > HOT_TRADE_MS) {
+    return `live skip $${coin.symbol} — curve quiet. paper only.`;
   }
   return null;
 }
@@ -167,7 +197,7 @@ export function scoreSetup(
     score += 8;
     bits.push("fresh");
   }
-  if (coin.usdMcap >= 5000 && coin.usdMcap <= 28000) {
+  if (coin.usdMcap >= HUNT_MCAP_MIN && coin.usdMcap <= 200_000) {
     score += 12;
     bits.push("window");
   }
@@ -203,7 +233,7 @@ function scorePons(
     score += 8;
     bits.push("fresh");
   }
-  if (coin.usdMcap >= 1500 && coin.usdMcap <= 25_000) {
+  if (coin.usdMcap >= HUNT_MCAP_MIN && coin.usdMcap <= 200_000) {
     score += 12;
     bits.push("window");
   }
@@ -223,35 +253,36 @@ export function ponsWake(
   occupied: Set<string>,
   kills: Pick<KillRecord, "mint" | "kind">[],
   already: Set<string>,
+  venue: TapeVenue = "pons",
 ): PumpCoin[] {
   const serial = new Set(
     kills.filter((k) => k.kind === "serial" || k.kind === "memory").map((k) => k.mint),
   );
+  const minMcap = HUNT_MCAP_MIN;
+  const cap = venue === "pons" ? 8 : 6;
   const extra: PumpCoin[] = [];
   for (const c of traded) {
     if (occupied.has(c.mint) || serial.has(c.mint) || already.has(c.mint)) continue;
     if (fresh.some((f) => f.mint === c.mint)) continue;
     if (!seen.has(c.mint)) continue;
-    if (c.usdMcap < 1500 || c.symbol === "???" || c.name === "unnamed") continue;
+    if (c.usdMcap < minMcap || c.usdMcap > HUNT_MCAP_MAX || c.symbol === "???" || c.name === "unnamed") continue;
     extra.push(c);
   }
   const map = new Map<string, PumpCoin>();
   for (const c of [...fresh, ...extra]) map.set(c.mint, c);
-  return Array.from(map.values()).slice(0, 8);
+  return Array.from(map.values()).slice(0, cap);
 }
 
 export function tapeHeat(coins: PumpCoin[], venue: TapeVenue, now: number): TapeHeat {
   const born = 10 * 60_000;
-  const boardMs = venue === "pons" ? 2 * 60 * 60_000 : 10 * 60_000;
+  const boardMs = venue === "pons" ? 12 * 60 * 60_000 : 12 * 60 * 60_000;
   const fresh = coins.filter((c) => now - c.createdAt < born);
   const board = coins.filter((c) => now - c.createdAt < boardMs);
   const named = fresh.filter(
     (c) => c.symbol.trim() && c.symbol !== "???" && c.name.trim().toLowerCase() !== "unnamed",
   );
   const hunt = (c: PumpCoin) =>
-    venue === "pons"
-      ? c.usdMcap >= 400 && c.usdMcap <= 90_000
-      : c.usdMcap >= 700 && c.usdMcap <= 90_000 && !c.complete;
+    c.usdMcap >= HUNT_MCAP_MIN && c.usdMcap <= HUNT_MCAP_MAX;
   const live = board.filter(hunt);
   const runners = board.filter((c) => c.usdMcap >= 8_000);
   const flowUsd = board.reduce((s, c) => s + Math.max(0, c.usdMcap), 0);
@@ -435,30 +466,31 @@ export function writeWeather(
     else if (kinds.includes("woke")) sitMs = 90_000;
     else if (kinds.includes("bleed")) sitMs = 120_000;
     sitMs = clamp(sitMs, 60_000, 4 * 60_000);
-    if (kinds.includes("rip")) trailArm = 0.38;
-    else if (kinds.includes("harvest")) trailArm = Math.max(trailArm, 0.45);
-    trailArm = clamp(trailArm, 0.35, 0.6);
+    if (kinds.includes("rip") || kinds.includes("died") || kinds.includes("bleed")) trailArm = 0.22;
+    else if (kinds.includes("harvest")) trailArm = Math.max(trailArm, 0.28);
+    trailArm = clamp(trailArm, 0.2, 0.35);
     if (kinds.includes("rip") || kinds.includes("died") || kinds.includes("bleed")) greenArm = 0.08;
-    else if (kinds.includes("harvest")) greenArm = 0.12;
-    greenArm = clamp(greenArm, 0.08, 0.18);
+    else if (kinds.includes("harvest")) greenArm = 0.1;
+    greenArm = clamp(greenArm, 0.08, 0.12);
   } else {
     if (kinds.includes("rip")) {
-      trailArmPump = clamp(trailArmPump - 0.15, 0.22, 0.7);
-      trailGivePump = 0.22;
+      trailArmPump = 0.2;
+      trailGivePump = 0.14;
       greenArm = 0.08;
     } else if (kinds.includes("died") || kinds.includes("bleed")) {
-      trailArmPump = clamp(trailArmPump - 0.15, 0.22, 0.7);
-      greenArm = 0.1;
+      trailArmPump = 0.22;
+      trailGivePump = 0.16;
+      greenArm = 0.08;
     } else if (kinds.includes("harvest")) {
-      trailArmPump = clamp(trailArmPump + 0.08, 0.22, 0.7);
+      trailArmPump = clamp(trailArmPump + 0.04, 0.18, 0.32);
       trailGivePump = TRAIL_GIVE;
-      greenArm = 0.15;
+      greenArm = 0.1;
     } else if (kinds.includes("woke")) {
-      trailArmPump = clamp(Math.min(trailArmPump, 0.5), 0.22, 0.7);
+      trailArmPump = clamp(Math.min(trailArmPump, 0.28), 0.18, 0.35);
     }
-    trailArmPump = clamp(trailArmPump, 0.22, 0.7);
-    trailGivePump = clamp(trailGivePump, 0.18, 0.35);
-    greenArm = clamp(greenArm, 0.08, 0.18);
+    trailArmPump = clamp(trailArmPump, 0.18, 0.35);
+    trailGivePump = clamp(trailGivePump, 0.12, 0.2);
+    greenArm = clamp(greenArm, 0.08, 0.12);
   }
   greenKeep = 0.02;
 
@@ -520,6 +552,12 @@ export function paperFloor(book: Playbook, weather: Weather, spirit: number): nu
   return clamp(weather.bar + cloneOffset, 40, spiritCap);
 }
 
+export function liveFloor(book: Playbook, weather: Weather, spirit: number): number {
+  const paper = paperFloor(book, weather, spirit);
+  const cap = Math.max(paper, Math.max(40, spirit));
+  return clamp(paper + 4, paper, cap);
+}
+
 export function minClip(venue?: TapeVenue): number {
   return venue === "pons" ? 2 : 4;
 }
@@ -570,10 +608,6 @@ export function detectMeta(runners: PumpCoin[], now: number): MetaState | null {
   const top = scores[0];
   if (!top || top.n / recent.length < 0.35) return null;
   const keywords = CLUSTERS[top.name] ?? [];
-  const drop = scores
-    .filter((s) => s.name !== top.name)
-    .flatMap((s) => CLUSTERS[s.name] ?? [])
-    .slice(0, 8);
   const thesis =
     top.name === "stocks"
       ? "stock memes only"
@@ -587,7 +621,7 @@ export function detectMeta(runners: PumpCoin[], now: number): MetaState | null {
   return {
     thesis,
     keywords,
-    drop,
+    drop: [],
     source: "local",
     updatedAt: now,
   };
@@ -599,21 +633,30 @@ export function reviewLosersLocal(
 ): { drop: string[]; note: string } | null {
   const losses = closed.filter((t) => t.pnlUsd < 0);
   if (losses.length < 2) return null;
-  const text = losses.map((t) => `${t.symbol} ${t.name}`).join(" ").toLowerCase();
-  const extra: string[] = [];
-  for (const words of Object.values(CLUSTERS)) {
-    extra.push(...words.filter((w) => text.includes(w)));
+  const hits: Record<string, number> = {};
+  for (const t of losses) {
+    for (const tok of tokensFrom(t.name, t.symbol)) {
+      hits[tok] = (hits[tok] ?? 0) + 1;
+    }
   }
+  const extra = Object.entries(hits)
+    .filter(([tok, n]) => {
+      if (n < 2) return false;
+      const stat = meta.words?.[tok];
+      if (stat) return wordShouldDrop(stat);
+      return n >= 2;
+    })
+    .map(([tok]) => tok);
   const drop = Array.from(new Set([...meta.drop, ...extra])).slice(0, 12);
   if (drop.length === meta.drop.length) {
     return {
       drop,
-      note: `${losses.length} losers reread. no new drop list. holding ${meta.thesis}.`,
+      note: `${losses.length} losers reread. no word with a sample. holding ${meta.thesis}.`,
     };
   }
   return {
     drop,
-    note: `${losses.length} losers reread. dropping ${extra.slice(0, 4).join(", ") || "the cluster"}.`,
+    note: `${losses.length} losers reread. dropping ${extra.slice(0, 4).join(", ") || "the cluster"} after a repeat.`,
   };
 }
 
@@ -634,27 +677,117 @@ export function tokensFrom(name: string, symbol: string): string[] {
   return Array.from(new Set([...extra, ...words])).slice(0, 6);
 }
 
+export function wordShouldDrop(s: WordStat): boolean {
+  return s.n >= 3 && s.w / s.n <= 0.34 && s.pnl < 0;
+}
+
+export function wordShouldLift(s: WordStat): boolean {
+  return s.n >= 3 && s.w / s.n >= 0.5 && s.pnl >= 0;
+}
+
+export function onParole(book: Playbook, creator: string): boolean {
+  return !!creator && (book.parole ?? []).includes(creator);
+}
+
+function markWord(
+  words: Record<string, WordStat>,
+  tok: string,
+  win: boolean,
+  pnl: number,
+): Record<string, WordStat> {
+  const cur = words[tok] ?? { n: 0, w: 0, pnl: 0 };
+  return {
+    ...words,
+    [tok]: {
+      n: cur.n + 1,
+      w: cur.w + (win ? 1 : 0),
+      pnl: Math.round((cur.pnl + pnl) * 100) / 100,
+    },
+  };
+}
+
+function pruneWords(words: Record<string, WordStat>, cap = 48): Record<string, WordStat> {
+  const keys = Object.keys(words);
+  if (keys.length <= cap) return words;
+  const ranked = keys.sort((a, b) => words[a].n - words[b].n || words[a].pnl - words[b].pnl);
+  const drop = new Set(ranked.slice(0, keys.length - cap));
+  const next: Record<string, WordStat> = {};
+  for (const k of keys) {
+    if (!drop.has(k)) next[k] = words[k];
+  }
+  return next;
+}
+
+function bumpTape(prev: SourceTape | undefined, pnl: number): SourceTape {
+  const n = (prev?.n ?? 0) + 1;
+  return { n, pnl: Math.round(((prev?.pnl ?? 0) + pnl) * 100) / 100 };
+}
+
+export function grokTrust(meta: MetaState): "grok" | "local" | "open" {
+  const g = meta.grokTape;
+  const l = meta.localTape;
+  if (!g || !l || g.n < 4 || l.n < 4) return meta.source === "open" ? "open" : meta.source;
+  const gAvg = g.pnl / g.n;
+  const lAvg = l.pnl / l.n;
+  if (gAvg + 0.4 < lAvg) return "local";
+  return "grok";
+}
+
+export function wilsonLow(wins: number, n: number, z = 1.44): number {
+  if (n <= 0) return 0;
+  const p = Math.min(1, Math.max(0, wins / n));
+  const z2 = z * z;
+  const den = 1 + z2 / n;
+  const centre = p + z2 / (2 * n);
+  const margin = z * Math.sqrt((p * (1 - p) + z2 / (4 * n)) / n);
+  return Math.max(0, (centre - margin) / den);
+}
+
 export function absorbTrade(
   trade: ClosedTrade,
   playbook: Playbook,
   meta: MetaState,
+  recent: ClosedTrade[] = [],
 ): { playbook: Playbook; meta: MetaState; lessons: Omit<Lesson, "id">[] } {
   const now = Date.now();
   const lessons: Omit<Lesson, "id">[] = [];
   const next: Playbook = {
     ...playbook,
     bannedCreators: [...(playbook.bannedCreators ?? [])],
+    parole: [...(playbook.parole ?? [])],
   };
   let drop = [...(meta.drop ?? [])];
   let keywords = [...(meta.keywords ?? [])];
+  let words = { ...(meta.words ?? {}) };
   const text = `${trade.name} ${trade.symbol}`.toLowerCase();
   const cluster = clusterOf(text);
+  const win = trade.pnlUsd > 0;
+  const toks = tokensFrom(trade.name, trade.symbol);
+  for (const tok of toks) words = markWord(words, tok, win, trade.pnlUsd);
+  words = pruneWords(words);
 
-  if (trade.pnlUsd < 0) {
-    const toks = tokensFrom(trade.name, trade.symbol);
-    const added = toks.filter((t) => !drop.includes(t));
-    drop = Array.from(new Set([...drop, ...toks])).slice(0, 12);
-    if (trade.creator && !next.bannedCreators.includes(trade.creator)) {
+  const newlyDropped: string[] = [];
+  const lifted: string[] = [];
+  for (const tok of toks) {
+    const stat = words[tok];
+    if (!stat) continue;
+    if (wordShouldDrop(stat) && !drop.includes(tok)) {
+      drop.push(tok);
+      newlyDropped.push(tok);
+    }
+    if (wordShouldLift(stat) && drop.includes(tok)) {
+      drop = drop.filter((d) => d !== tok);
+      lifted.push(tok);
+    }
+  }
+  drop = drop.slice(0, 12);
+
+  const src = trade.metaSource === "grok" ? "grok" : trade.metaSource === "local" ? "local" : meta.source;
+  const grokTape = src === "grok" ? bumpTape(meta.grokTape, trade.pnlUsd) : meta.grokTape;
+  const localTape = src === "local" || src === "open" ? bumpTape(meta.localTape, trade.pnlUsd) : meta.localTape;
+
+  if (!win) {
+    if (trade.creator && !next.bannedCreators.includes(trade.creator) && !onParole(next, trade.creator)) {
       next.bannedCreators = [...next.bannedCreators, trade.creator].slice(-40);
       lessons.push({
         at: now,
@@ -662,19 +795,36 @@ export function absorbTrade(
         text: `memory: deployer of $${trade.symbol} is burned. next coin from that wallet dies.`,
       });
     }
-    next.scoreFloor = Math.min(72, next.scoreFloor + (trade.score >= 60 ? 4 : 2));
+    next.scoreFloor = Math.min(72, next.scoreFloor + (trade.score >= 60 ? 2 : 1));
     lessons.push({
       at: now,
       agent: "SNIPER",
       text: `$${trade.symbol} scored ${trade.score} and lost. floor is ${next.scoreFloor}.`,
     });
+    const peak = trade.peakPct ?? 0;
     if (trade.reason === "stop") {
-      next.stopPct = Math.max(-0.5, Math.min(-0.18, next.stopPct + 0.05));
-      lessons.push({
-        at: now,
-        agent: "RISK",
-        text: `tightened stop to ${(next.stopPct * 100).toFixed(0)}%. never widening.`,
-      });
+      if (peak < 0.08) {
+        next.stopPct = Math.max(-0.5, Math.min(-0.18, next.stopPct + 0.05));
+        lessons.push({
+          at: now,
+          agent: "RISK",
+          text: `tightened stop to ${(next.stopPct * 100).toFixed(0)}%. never ran.`,
+        });
+      } else {
+        const window = [trade, ...recent].slice(0, 6);
+        const greenStops = window.filter((t) => t.reason === "stop" && (t.peakPct ?? 0) >= 0.12);
+        if (greenStops.length >= 3) {
+          const eased = Math.max(-0.5, next.stopPct - 0.03);
+          if (eased < next.stopPct - 0.001) {
+            next.stopPct = eased;
+            lessons.push({
+              at: now,
+              agent: "RISK",
+              text: `eased stop to ${(next.stopPct * 100).toFixed(0)}%. three greens died on the written stop.`,
+            });
+          }
+        }
+      }
     }
     if (trade.reason === "time") {
       next.takePct = Math.max(0.5, next.takePct - 0.1);
@@ -685,24 +835,24 @@ export function absorbTrade(
       });
     }
     next.socialBias = Math.max(-8, next.socialBias - 1);
-    if (added.length) {
+    if (newlyDropped.length) {
       lessons.push({
         at: now,
         agent: "META",
-        text: `scar on the book. dropping ${added.slice(0, 3).join(", ")}.`,
+        text: `scar with a sample. dropping ${newlyDropped.slice(0, 3).join(", ")}.`,
       });
     }
-    if (cluster) {
+    if (cluster && newlyDropped.length) {
       lessons.push({
         at: now,
         agent: "META",
-        text: `${cluster} paid us nothing. cooling that cluster.`,
+        text: `${cluster} is losing on the ledger. cooling it.`,
       });
     }
   } else {
     if (cluster) {
-      const words = CLUSTERS[cluster] ?? [];
-      keywords = Array.from(new Set([...keywords, ...words.slice(0, 4)])).slice(0, 10);
+      const clusterWords = CLUSTERS[cluster] ?? [];
+      keywords = Array.from(new Set([...keywords, ...clusterWords.slice(0, 4)])).slice(0, 10);
       lessons.push({
         at: now,
         agent: "META",
@@ -717,6 +867,13 @@ export function absorbTrade(
     }
     next.scoreFloor = Math.max(40, next.scoreFloor - 1);
     next.socialBias = Math.min(8, next.socialBias + 1);
+    if (lifted.length) {
+      lessons.push({
+        at: now,
+        agent: "META",
+        text: `ledger flipped. lifting drop on ${lifted.slice(0, 2).join(", ")}.`,
+      });
+    }
   }
 
   return {
@@ -725,6 +882,9 @@ export function absorbTrade(
       ...meta,
       drop,
       keywords,
+      words,
+      grokTape,
+      localTape,
       source: meta.source === "open" ? "local" : meta.source,
       updatedAt: now,
     },
@@ -766,57 +926,120 @@ export function absorbKill(
   k: KillRecord,
   playbook: Playbook,
   meta: MetaState,
+  kills: KillRecord[] = [],
 ): { playbook: Playbook; meta: MetaState; lessons: Omit<Lesson, "id">[] } {
   const now = Date.now();
   const at = Math.max(k.mcapAt, 1);
   const multiple = k.lastMcap / at;
   const lessons: Omit<Lesson, "id">[] = [];
-  const next: Playbook = { ...playbook, bannedCreators: [...(playbook.bannedCreators ?? [])] };
+  const next: Playbook = {
+    ...playbook,
+    bannedCreators: [...(playbook.bannedCreators ?? [])],
+    parole: [...(playbook.parole ?? [])],
+  };
   let drop = [...(meta.drop ?? [])];
 
   if (k.grade === "flat" || k.grade === "pending") {
     return { playbook, meta, lessons };
   }
 
+  const scored = wardenScore([...kills.filter((x) => x.mint !== k.mint), k]);
+  const judged = scored.held + scored.missed;
+
   if (k.grade === "rugged") {
     const pct = Math.round((multiple - 1) * 100);
     if (k.kind === "score" || k.kind === "meta") {
-      lessons.push({
-        at: now,
-        agent: "WARDEN",
-        text: `grade $${k.symbol} rugged (${pct}%). the no held.`,
-      });
+      if (judged >= 6 && scored.acc >= 0.7) {
+        next.scoreFloor = Math.min(72, next.scoreFloor + 2);
+        lessons.push({
+          at: now,
+          agent: "WARDEN",
+          text: `grade $${k.symbol} rugged (${pct}%). warden is holding ${(scored.acc * 100).toFixed(0)}%. floor ${next.scoreFloor}.`,
+        });
+      } else {
+        lessons.push({
+          at: now,
+          agent: "WARDEN",
+          text: `grade $${k.symbol} rugged (${pct}%). the no held.`,
+        });
+      }
     } else if (k.kind === "serial") {
-      lessons.push({
-        at: now,
-        agent: "WARDEN",
-        text: `grade $${k.symbol} rugged. serial dump. factory confirmed.`,
-      });
+      if (onParole(next, k.creator)) {
+        next.parole = (next.parole ?? []).filter((c) => c !== k.creator);
+        if (k.creator && !next.bannedCreators.includes(k.creator)) {
+          next.bannedCreators = [...next.bannedCreators, k.creator].slice(-40);
+        }
+        lessons.push({
+          at: now,
+          agent: "WARDEN",
+          text: `grade $${k.symbol} rugged. parole revoked. factory confirmed.`,
+        });
+      } else {
+        lessons.push({
+          at: now,
+          agent: "WARDEN",
+          text: `grade $${k.symbol} rugged. serial dump. factory confirmed.`,
+        });
+      }
     } else {
-      lessons.push({
-        at: now,
-        agent: "WARDEN",
-        text: `grade $${k.symbol} rugged. memory held.`,
-      });
+      if (onParole(next, k.creator)) {
+        next.parole = (next.parole ?? []).filter((c) => c !== k.creator);
+        if (k.creator && !next.bannedCreators.includes(k.creator)) {
+          next.bannedCreators = [...next.bannedCreators, k.creator].slice(-40);
+        }
+        lessons.push({
+          at: now,
+          agent: "WARDEN",
+          text: `grade $${k.symbol} rugged. parole revoked. memory held.`,
+        });
+      } else {
+        lessons.push({
+          at: now,
+          agent: "WARDEN",
+          text: `grade $${k.symbol} rugged. memory held.`,
+        });
+      }
     }
     return { playbook: next, meta, lessons };
   }
 
   if (k.kind === "serial" || k.kind === "memory") {
-    lessons.push({
-      at: now,
-      agent: "WARDEN",
-      text: `grade $${k.symbol} ran ${multiple.toFixed(1)}x. still a factory. rule stays.`,
-    });
+    const prior = kills.filter(
+      (x) =>
+        x.creator === k.creator &&
+        (x.kind === "serial" || x.kind === "memory") &&
+        x.grade === "ran" &&
+        x.mint !== k.mint,
+    ).length;
+    const ranN = prior + 1;
+    if (ranN >= 2 && k.creator) {
+      next.parole = Array.from(new Set([...(next.parole ?? []), k.creator])).slice(-20);
+      next.bannedCreators = next.bannedCreators.filter((c) => c !== k.creator);
+      lessons.push({
+        at: now,
+        agent: "WARDEN",
+        text: `grade $${k.symbol} ran ${multiple.toFixed(1)}x. ${ranN} misses on this wallet. parole — serial/memory sleeps.`,
+      });
+    } else {
+      lessons.push({
+        at: now,
+        agent: "WARDEN",
+        text: `grade $${k.symbol} ran ${multiple.toFixed(1)}x. still a factory. ${ranN}/2 before parole.`,
+      });
+    }
     return { playbook: next, meta, lessons };
   }
 
   if (k.kind === "score") {
-    next.scoreFloor = Math.max(40, next.scoreFloor - 2);
+    const cut = judged >= 6 && scored.acc < 0.45 ? 4 : 2;
+    next.scoreFloor = Math.max(40, next.scoreFloor - cut);
     lessons.push({
       at: now,
       agent: "WARDEN",
-      text: `grade $${k.symbol} ran ${multiple.toFixed(1)}x. floor is ${next.scoreFloor}. late, not reckless.`,
+      text:
+        cut >= 4
+          ? `grade $${k.symbol} ran ${multiple.toFixed(1)}x. warden is missing. floor ${next.scoreFloor}.`
+          : `grade $${k.symbol} ran ${multiple.toFixed(1)}x. floor is ${next.scoreFloor}. late, not reckless.`,
     });
   }
 
@@ -831,7 +1054,8 @@ export function absorbKill(
         text: `grade $${k.symbol} ran. lifting drop on ${hit.slice(0, 2).join(", ")}.`,
       });
     } else {
-      next.scoreFloor = Math.max(40, next.scoreFloor - 1);
+      const cut = judged >= 6 && scored.acc < 0.45 ? 3 : 1;
+      next.scoreFloor = Math.max(40, next.scoreFloor - cut);
       lessons.push({
         at: now,
         agent: "WARDEN",
@@ -1017,6 +1241,7 @@ export function decideSell(
   if (peakPct >= green.arm && pct <= green.keep) return "take";
   if (pct <= stop) return "stop";
   const held = now - p.openedAt;
+  if (held >= PULSE_MS && peakPct < PULSE_PEAK && pct <= 0) return "time";
   if (venue === "pons") {
     const sit = weather?.sitMs ?? 90_000;
     if (held > sit && pct < 0.05) return "time";
@@ -1028,6 +1253,58 @@ export function decideSell(
   if (held > 12 * 60_000 && pct < 0.12) return "time";
   if (held > 18 * 60_000 && pct < 0.25) return "time";
   return null;
+}
+
+export const DAY_MS = 24 * 60 * 60 * 1000;
+
+export function stampDayHits(hits: number[] | undefined, now: number): number[] {
+  return [now, ...(hits ?? [])].filter((t) => now - t < DAY_MS).slice(0, 400);
+}
+
+export function clipsInDay(
+  hits: number[] | undefined,
+  closed: { closedAt: number }[],
+  now: number,
+): number {
+  const fromHits = (hits ?? []).filter((t) => now - t < DAY_MS).length;
+  const fromClosed = closed.filter((t) => now - t.closedAt < DAY_MS).length;
+  return Math.max(fromHits, fromClosed);
+}
+
+export type GmgnSnap = {
+  isHoneypot?: string;
+  sellTax?: number;
+  buyTax?: number;
+  top10?: number;
+  rugRatio?: number;
+};
+
+export function gmgnVeto(snap: GmgnSnap): string | null {
+  const honey = (snap.isHoneypot ?? "").toLowerCase();
+  if (honey === "yes" || honey === "true" || honey === "1") {
+    return "honeypot. GMGN confirmed.";
+  }
+  if ((snap.sellTax ?? 0) > 0.1) {
+    return `sell tax ${Math.round((snap.sellTax ?? 0) * 100)}%. GMGN.`;
+  }
+  if ((snap.top10 ?? 0) > 0.55) {
+    return `top ten owns ${Math.round((snap.top10 ?? 0) * 100)}%. GMGN.`;
+  }
+  if ((snap.rugRatio ?? 0) > 0.35) {
+    return `rug ratio ${Math.round((snap.rugRatio ?? 0) * 100)}%. GMGN.`;
+  }
+  return null;
+}
+
+export function gmgnLine(snap: GmgnSnap): string {
+  const honey = snap.isHoneypot ? snap.isHoneypot : "n/a";
+  const tax =
+    snap.sellTax != null && Number.isFinite(snap.sellTax)
+      ? `${Math.round(snap.sellTax * 100)}%`
+      : "—";
+  const top =
+    snap.top10 != null && Number.isFinite(snap.top10) ? `${Math.round(snap.top10 * 100)}%` : "—";
+  return `honey ${honey} · tax ${tax} · top10 ${top}`;
 }
 
 export function deadChair(
@@ -1111,9 +1388,11 @@ export function pickHotLane(
     .filter((s) => s.hunting)
     .map((s) => {
       const n = s.closed.length;
-      const win = n ? s.closed.filter((t) => t.pnlUsd > 0).length / n : 0;
+      const wins = s.closed.filter((t) => t.pnlUsd > 0).length;
+      const win = n ? wins / n : 0;
       const ageDays = s.startedAt ? Math.max(0, now - s.startedAt) / 86_400_000 : 0;
-      return { id: s.id, n, win, ageDays, merit: win * 100 + ageDays };
+      const floor = wilsonLow(wins, n);
+      return { id: s.id, n, win, ageDays, merit: floor * 100 + ageDays };
     });
   if (!rows.length) return null;
   rows.sort((a, b) => b.merit - a.merit || b.n - a.n || b.ageDays - a.ageDays);

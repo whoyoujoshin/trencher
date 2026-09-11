@@ -8,6 +8,42 @@ function isStaleChunk(message: string): boolean {
   );
 }
 
+export function hardReload(force = false) {
+  try {
+    if (force) sessionStorage.removeItem("trencher-chunk-reload");
+  } catch {
+    /* ignore */
+  }
+  const go = () => {
+    const u = new URL(window.location.href);
+    u.searchParams.set("desk", String(Date.now()));
+    window.location.replace(u.toString());
+  };
+  const sw =
+    typeof navigator !== "undefined" && "serviceWorker" in navigator
+      ? navigator.serviceWorker.getRegistrations().then((regs) => Promise.all(regs.map((r) => r.unregister())))
+      : Promise.resolve();
+  const cachesClear =
+    typeof caches !== "undefined"
+      ? caches.keys().then((keys) => Promise.all(keys.map((k) => caches.delete(k))))
+      : Promise.resolve();
+  void Promise.all([sw, cachesClear]).finally(go);
+}
+
+export function clearStaleBoot() {
+  try {
+    sessionStorage.removeItem("trencher-chunk-reload");
+  } catch {
+    /* ignore */
+  }
+  if (typeof window === "undefined") return;
+  const u = new URL(window.location.href);
+  if (!u.searchParams.has("desk")) return;
+  u.searchParams.delete("desk");
+  const next = u.pathname + (u.searchParams.toString() ? `?${u.searchParams}` : "") + u.hash;
+  window.history.replaceState({}, "", next);
+}
+
 export function AppErrorComponent({ error }: ErrorComponentProps) {
   const message = error.message || "An unexpected error occurred. Try reloading the page.";
   const stale = isStaleChunk(message);
@@ -20,7 +56,7 @@ export function AppErrorComponent({ error }: ErrorComponentProps) {
     } catch {
       return;
     }
-    window.location.reload();
+    hardReload();
   }, [stale]);
 
   return (
@@ -31,18 +67,15 @@ export function AppErrorComponent({ error }: ErrorComponentProps) {
       <h1 className="text-lg font-semibold">
         {stale ? "Desk file went stale" : "Something went wrong"}
       </h1>
-      <p className="max-w-md text-sm break-words text-muted">{message}</p>
+      <p className="max-w-md text-sm break-words text-muted">
+        {stale
+          ? "This tab is holding an old desk file from the last publish. Reload pulls the current one."
+          : message}
+      </p>
       <button
         type="button"
         className="mt-2 border border-line px-3 py-2 font-mono text-2xs tracking-label text-fg uppercase hover:border-fg"
-        onClick={() => {
-          try {
-            sessionStorage.removeItem("trencher-chunk-reload");
-          } catch {
-            /* ignore */
-          }
-          window.location.reload();
-        }}
+        onClick={() => hardReload(true)}
       >
         Reload the desk
       </button>

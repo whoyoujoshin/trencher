@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { blankPlaybook, cheapKill, decideSell, emptyPrint, exitMcap, formatWeather, paperFloor, ponsWake, regimeShift, scarSit, scoreSetup, setupMatch, sizeByScore, takeWindow, tapeHeat, trailSpec, windowPrint, writeWeather } from "./logic.ts";
-import { blankWeather } from "./types.ts";
+import { absorbKill, absorbTrade, blankPlaybook, cheapKill, clipsInDay, decideSell, emptyPrint, exitMcap, formatWeather, gmgnLine, gmgnVeto, grokTrust, hotLiveBlock, isHotFill, liveFloor, paperFloor, pickHotLane, ponsWake, regimeShift, scarSit, scoreSetup, setupMatch, sizeByScore, stampDayHits, takeWindow, tapeHeat, trailSpec, windowPrint, wilsonLow, wordShouldDrop, writeWeather } from "./logic.ts";
+import { blankWeather, stampRail } from "./types.ts";
 import type { ClosedTrade, MetaState, PumpCoin } from "./types.ts";
 
 function coin(over: Partial<PumpCoin> = {}): PumpCoin {
@@ -13,7 +13,7 @@ function coin(over: Partial<PumpCoin> = {}): PumpCoin {
     image: null,
     creator: "0x" + "22".repeat(20),
     createdAt: Date.now() - 10 * 60_000,
-    usdMcap: 6400,
+    usdMcap: 64_000,
     solMcap: 2,
     replyCount: 0,
     complete: false,
@@ -25,7 +25,7 @@ function coin(over: Partial<PumpCoin> = {}): PumpCoin {
     website: null,
     username: null,
     lastTradeAt: Date.now(),
-    athMcap: 6400,
+    athMcap: 64_000,
     venue: "pons",
     ...over,
   };
@@ -45,8 +45,24 @@ describe("pons retune", () => {
   });
 
   it("still cheap-kills a completed Pump curve", () => {
-    const c = coin({ venue: "pump", complete: true, mint: "So1anaMint1111111111111111111111111111111" });
+    const c = coin({
+      venue: "pump",
+      complete: true,
+      usdMcap: 8_000,
+      mint: "So1anaMint1111111111111111111111111111111",
+    });
     assert.equal(cheapKill(c, Date.now()), "already off the curve. too late.");
+  });
+
+  it("lets a graduated Pump coin through once it has 50k book", () => {
+    const c = coin({
+      venue: "pump",
+      complete: true,
+      usdMcap: 72_000,
+      mint: "So1anaMint1111111111111111111111111111111",
+    });
+    assert.equal(cheapKill(c, Date.now()), null);
+    assert.equal(setupMatch(c, { ...open, keywords: [] }, Date.now()), null);
   });
 
   it("lets a 2h Pons name through cheap and setup despite Pump thesis", () => {
@@ -66,6 +82,17 @@ describe("pons retune", () => {
     const out = ponsWake([], [c], new Set([c.mint]), new Set(), [], new Set());
     assert.equal(out.length, 1);
     assert.equal(out[0].symbol, "CLAW");
+  });
+
+  it("wakes a seen Pump mint once the curve has book", () => {
+    const c = coin({
+      venue: "pump",
+      mint: "So1anaMint1111111111111111111111111111111",
+      usdMcap: 64_000,
+      complete: false,
+    });
+    const out = ponsWake([], [c], new Set([c.mint]), new Set(), [], new Set(), "pump");
+    assert.equal(out.length, 1);
   });
 
   it("time-stops a flat Pons clip after 90s so chairs rotate", () => {
@@ -159,20 +186,20 @@ describe("pons retune", () => {
     const now = Date.now();
     const busy = tapeHeat(
       [
-        coin({ createdAt: now - 60_000, usdMcap: 12_000, symbol: "HOT" }),
-        coin({ createdAt: now - 120_000, usdMcap: 9_000, symbol: "RUN" }),
-        coin({ createdAt: now - 180_000, usdMcap: 4_000, symbol: "OK" }),
+        coin({ createdAt: now - 60_000, usdMcap: 80_000, symbol: "HOT" }),
+        coin({ createdAt: now - 120_000, usdMcap: 70_000, symbol: "RUN" }),
+        coin({ createdAt: now - 180_000, usdMcap: 60_000, symbol: "OK" }),
       ],
       "pons",
       now,
     );
     const thin = tapeHeat(
-      [coin({ createdAt: now - 8 * 60_000, usdMcap: 2_000, symbol: "MEH" })],
+      [coin({ createdAt: now - 8 * 60_000, usdMcap: 8_000, symbol: "MEH" })],
       "pons",
       now,
     );
     assert.ok(busy.score > thin.score, `${busy.score} vs ${thin.score}`);
-    assert.equal(busy.runners, 2);
+    assert.equal(busy.runners, 3);
   });
 });
 
@@ -238,6 +265,14 @@ describe("META weather", () => {
     assert.equal(paperFloor(hatch, wx, 72), 47);
   });
 
+  it("live floor sits 4 over paper, never above spirit", () => {
+    const wx = { ...blankWeather(), bar: 53 };
+    const book = blankPlaybook();
+    assert.equal(liveFloor(book, wx, 72), 57);
+    assert.equal(liveFloor(book, { ...wx, bar: 70 }, 72), 72);
+    assert.ok(liveFloor(book, wx, 72) < 72);
+  });
+
   it("sizes down on weather 0.7 without breaking the 8 usd cap", () => {
     const full = sizeByScore(500, 4000, 70, "pons");
     const cut = sizeByScore(500, 4000, 70, "pons", { ...blankWeather(), size: 0.7 });
@@ -296,8 +331,8 @@ describe("META weather", () => {
   it("lowers Pump trail arm on died so +100% is not the only take", () => {
     const wx = writeWeather(blankWeather(), ["died"], emptyPrint("pump"), 72);
     const spec = trailSpec("pump", wx);
-    assert.ok(spec.arm <= 0.4, `arm ${spec.arm}`);
-    assert.ok(spec.arm >= 0.22);
+    assert.ok(spec.arm <= 0.25, `arm ${spec.arm}`);
+    assert.ok(spec.arm >= 0.18);
     const now = Date.now();
     const take = decideSell(
       {
@@ -314,6 +349,24 @@ describe("META weather", () => {
       wx,
     );
     assert.equal(take, "take");
+  });
+
+  it("arms the trail at +25% and books a green that covers fees", () => {
+    const spec = trailSpec("pump");
+    assert.ok(Math.abs(spec.arm - 0.25) < 0.001, `arm ${spec.arm}`);
+    const pos = {
+      costUsd: 15,
+      entryMcap: 5000,
+      lastMcap: 5000 * 1.25 * (1 - spec.give) - 1,
+      peakMcap: 6250,
+      openedAt: Date.now() - 40_000,
+      stopPct: -0.18,
+    };
+    const reason = decideSell(pos, Date.now(), { ...blankPlaybook(), stopPct: -0.18 }, "pump");
+    assert.equal(reason, "take");
+    const mark = exitMcap(pos, "pump");
+    const booked = mark / 5000 - 1;
+    assert.ok(booked >= 0.02, `booked ${(booked * 100).toFixed(1)}% should cover fees`);
   });
 
   it("banks a +18% peak at +2% instead of riding the -18% stop", () => {
@@ -385,5 +438,255 @@ describe("META weather", () => {
     assert.equal(reason, "stop");
     const mark = exitMcap(pos, "pump");
     assert.ok(Math.abs(mark - 5000 * 0.82) < 1, `stop mark ${mark}`);
+  });
+
+  it("pulse-dumps a dead clip after 8s instead of waiting for -18%", () => {
+    const now = Date.now();
+    const pos = {
+      costUsd: 15,
+      entryMcap: 5000,
+      lastMcap: 4950,
+      peakMcap: 5245,
+      openedAt: now - 8_000,
+      stopPct: -0.18,
+    };
+    assert.equal(decideSell(pos, now, { ...blankPlaybook(), stopPct: -0.18 }, "pump"), "time");
+    const mark = exitMcap(pos, "pump");
+    assert.ok(Math.abs(mark - 4950) < 1, `pulse mark ${mark} should be last, not the stop`);
+    assert.equal(
+      decideSell({ ...pos, openedAt: now - 4_000 }, now, { ...blankPlaybook(), stopPct: -0.18 }, "pump"),
+      null,
+    );
+    assert.equal(
+      decideSell({ ...pos, lastMcap: 5100 }, now, { ...blankPlaybook(), stopPct: -0.18 }, "pump"),
+      null,
+    );
+  });
+
+  it("protects a +10% peak at +2% so an 8m time stop is not the bank", () => {
+    const now = Date.now();
+    const pos = {
+      costUsd: 15,
+      entryMcap: 5000,
+      lastMcap: 4900,
+      peakMcap: 5535,
+      openedAt: now - 90_000,
+      stopPct: -0.18,
+    };
+    const reason = decideSell(pos, now, { ...blankPlaybook(), stopPct: -0.18 }, "pump");
+    assert.equal(reason, "take");
+    const mark = exitMcap(pos, "pump");
+    assert.ok(Math.abs(mark - 5000 * 1.02) < 1, `protect mark ${mark}`);
+  });
+
+  it("keeps paper on a quiet Pump curve and a thin Pons book", () => {
+    const now = Date.now();
+    const quiet = coin({
+      venue: "pump",
+      mint: "So1anaMint1111111111111111111111111111111",
+      usdMcap: 64_000,
+      lastTradeAt: now - 90_000,
+    });
+    assert.ok(hotLiveBlock(quiet, now)?.includes("quiet"));
+    const woke = coin({
+      venue: "pump",
+      mint: "So1anaMint1111111111111111111111111111111",
+      usdMcap: 64_000,
+      lastTradeAt: now - 5_000,
+    });
+    assert.equal(hotLiveBlock(woke, now), null);
+    const thin = coin({ usdMcap: 1600 });
+    assert.ok(setupMatch(thin, open, now)?.includes("50k"));
+    assert.ok(hotLiveBlock(thin, now)?.includes("mcap"));
+    assert.equal(hotLiveBlock(coin({ usdMcap: 64_000 }), now), null);
+  });
+
+  it("counts clips in a rolling 24h window past the 40-close blotter", () => {
+    const now = Date.now();
+    const hits = stampDayHits(
+      Array.from({ length: 50 }, (_, i) => now - i * 60_000),
+      now,
+    );
+    assert.equal(hits.length, 51);
+    const closed = hits.slice(0, 40).map((t) => ({ closedAt: t }));
+    assert.equal(clipsInDay(hits, closed, now), 51);
+    const stale = stampDayHits([now - 25 * 60 * 60_000], now);
+    assert.equal(stale.length, 1);
+    assert.equal(clipsInDay([now - 30 * 60 * 60_000], [{ closedAt: now - 1000 }], now), 1);
+  });
+
+  it("vetoes a GMGN honeypot and a high sell tax, not a clean pump coin", () => {
+    assert.equal(gmgnVeto({ isHoneypot: "yes" }), "honeypot. GMGN confirmed.");
+    assert.ok(gmgnVeto({ sellTax: 0.15 })?.includes("sell tax"));
+    assert.ok(gmgnVeto({ top10: 0.7 })?.includes("top ten"));
+    assert.equal(gmgnVeto({ isHoneypot: "no", sellTax: 0, top10: 0.18, rugRatio: 0.02 }), null);
+    assert.match(gmgnLine({ isHoneypot: "no", sellTax: 0, top10: 0.22 }), /honey no/);
+  });
+});
+
+describe("self-teach", () => {
+  const meta: MetaState = {
+    thesis: "open book",
+    keywords: [],
+    drop: [],
+    source: "local",
+    updatedAt: 0,
+  };
+
+  function trade(over: Partial<ClosedTrade> = {}): ClosedTrade {
+    return {
+      mint: "m1",
+      symbol: "DOGE",
+      name: "Doge Coin",
+      creator: "walletA",
+      costUsd: 8,
+      proceedsUsd: 6,
+      pnlUsd: -2,
+      pnlPct: -0.18,
+      reason: "stop",
+      heldMs: 20_000,
+      openedAt: Date.now() - 20_000,
+      closedAt: Date.now(),
+      score: 50,
+      slipPct: 0,
+      feeUsd: 0.1,
+      peakPct: 0.02,
+      metaSource: "local",
+      ...over,
+    };
+  }
+
+  function kill(over: Partial<import("./types.ts").KillRecord> = {}): import("./types.ts").KillRecord {
+    return {
+      mint: "k1",
+      symbol: "X",
+      name: "X",
+      creator: "factory",
+      kind: "serial",
+      reason: "serial",
+      mcapAt: 4000,
+      killedAt: Date.now() - 80_000,
+      lastMcap: 12000,
+      grade: "ran",
+      gradedAt: Date.now(),
+      ...over,
+    };
+  }
+
+  it("does not drop a word after one loss", () => {
+    const out = absorbTrade(trade(), blankPlaybook(), meta);
+    assert.equal(out.meta.drop.includes("doge"), false);
+    assert.ok((out.meta.words?.doge?.n ?? 0) >= 1);
+  });
+
+  it("drops a word after three losing samples", () => {
+    let m = meta;
+    let book = blankPlaybook();
+    for (let i = 0; i < 3; i++) {
+      const out = absorbTrade(trade({ mint: `m${i}` }), book, m);
+      m = out.meta;
+      book = out.playbook;
+    }
+    assert.ok(wordShouldDrop(m.words!.doge));
+    assert.ok(m.drop.includes("doge") || m.drop.includes("dog"));
+  });
+
+  it("eases the stop after three green-then-stop clips", () => {
+    const green = { reason: "stop" as const, peakPct: 0.2, pnlUsd: -1.5, pnlPct: -0.18 };
+    const prior = [trade({ ...green, mint: "a" }), trade({ ...green, mint: "b" })];
+    const book = { ...blankPlaybook(), stopPct: -0.35 };
+    const out = absorbTrade(trade({ ...green, mint: "c" }), book, meta, prior);
+    assert.ok(out.playbook.stopPct < -0.35, `stop ${out.playbook.stopPct}`);
+    assert.ok(out.lessons.some((l) => l.text.includes("eased stop")));
+  });
+
+  it("tightens the stop when a clip never ran", () => {
+    const book = { ...blankPlaybook(), stopPct: -0.5 };
+    const out = absorbTrade(trade({ peakPct: 0.01 }), book, meta);
+    assert.ok(out.playbook.stopPct > -0.5);
+    assert.ok(out.lessons.some((l) => l.text.includes("never ran")));
+  });
+
+  it("paroles a wallet after two serial ran grades", () => {
+    const first = absorbKill(kill({ mint: "k1" }), blankPlaybook(), meta, []);
+    assert.equal((first.playbook.parole ?? []).includes("factory"), false);
+    const second = absorbKill(kill({ mint: "k2" }), first.playbook, meta, [
+      kill({ mint: "k1", grade: "ran" }),
+    ]);
+    assert.ok(second.playbook.parole?.includes("factory"));
+    assert.equal(second.playbook.bannedCreators.includes("factory"), false);
+  });
+
+  it("raises the floor when warden accuracy is high", () => {
+    const held = Array.from({ length: 7 }, (_, i) =>
+      kill({
+        mint: `h${i}`,
+        kind: "score",
+        grade: "rugged",
+        lastMcap: 200,
+        creator: `c${i}`,
+      }),
+    );
+    const book = { ...blankPlaybook(), scoreFloor: 50 };
+    const out = absorbKill(
+      kill({ mint: "now", kind: "score", grade: "rugged", lastMcap: 200, creator: "now" }),
+      book,
+      meta,
+      held,
+    );
+    assert.ok(out.playbook.scoreFloor >= 52, `floor ${out.playbook.scoreFloor}`);
+  });
+
+  it("cuts the floor harder when warden is missing", () => {
+    const missed = Array.from({ length: 7 }, (_, i) =>
+      kill({
+        mint: `m${i}`,
+        kind: "score",
+        grade: "ran",
+        lastMcap: 20000,
+        creator: `c${i}`,
+      }),
+    );
+    const book = { ...blankPlaybook(), scoreFloor: 60 };
+    const out = absorbKill(
+      kill({ mint: "now", kind: "score", grade: "ran", lastMcap: 18000, creator: "now" }),
+      book,
+      meta,
+      missed,
+    );
+    assert.ok(out.playbook.scoreFloor <= 56, `floor ${out.playbook.scoreFloor}`);
+  });
+
+  it("does not crown a 1-for-2 hatch over a 8-for-12 vet", () => {
+    const now = Date.now();
+    const hatch = Array.from({ length: 2 }, (_, i) => ({ pnlUsd: i === 0 ? 4 : -1 }));
+    const vet = Array.from({ length: 12 }, (_, i) => ({ pnlUsd: i < 8 ? 3 : -1 }));
+    const hot = pickHotLane(now, [
+      { id: "vet", hunting: true, closed: vet, startedAt: now - 86_400_000 },
+      { id: "hatch", hunting: true, closed: hatch, startedAt: now - 3_600_000 },
+      { id: "cub", hunting: false, closed: [], startedAt: null },
+    ]);
+    assert.equal(hot, "vet");
+    assert.ok(wilsonLow(1, 2) < wilsonLow(8, 12));
+  });
+
+  it("distrusts grok when the local tape is ahead", () => {
+    const cold: MetaState = {
+      ...meta,
+      source: "grok",
+      grokTape: { n: 6, pnl: -12 },
+      localTape: { n: 6, pnl: 8 },
+    };
+    assert.equal(grokTrust(cold), "local");
+    const thin: MetaState = { ...meta, source: "grok", grokTape: { n: 2, pnl: -4 }, localTape: { n: 2, pnl: 2 } };
+    assert.equal(grokTrust(thin), "grok");
+  });
+
+  it("does not treat a paper close as a hot fill", () => {
+    assert.equal(stampRail("So11111111111111111111111111111111111111112", false), "paper");
+    assert.equal(stampRail("So11111111111111111111111111111111111111112", true), "sol");
+    assert.equal(stampRail("0x" + "11".repeat(20), true), "eth");
+    assert.equal(isHotFill({ rail: "paper" }), false);
+    assert.equal(isHotFill({ rail: "sol" }), true);
   });
 });

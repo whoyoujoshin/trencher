@@ -1097,7 +1097,7 @@ export const waitEthReceipt = createServerFn({ method: "POST" })
 
 export const consultMeta = createServerFn({ method: "POST" })
   .validator((input: { snapshot: string; mode?: string }) => ({
-    snapshot: String(input.snapshot ?? "").slice(0, 4000),
+    snapshot: String(input.snapshot ?? "").slice(0, 5000),
     mode: input.mode === "review" ? "review" : "thesis",
   }))
   .handler(async ({ data }) => {
@@ -1119,8 +1119,8 @@ export const consultMeta = createServerFn({ method: "POST" })
             role: "system",
             content:
               data.mode === "review"
-                ? "You are META, chief of staff of TRENCHER. You never trade. Review losing paper trades and rewrite the drop list. Reply with compact JSON only: {\"thesis\":\"8 words max\",\"keywords\":[\"3-6 lowercase tokens\"],\"drop\":[\"tokens the desk may not buy\"],\"note\":\"one dry sentence about what the losers taught\"}. No markdown."
-                : "You are META, chief of staff of TRENCHER. You never touch the market. Reply with compact JSON only: {\"thesis\":\"8 words max\",\"keywords\":[\"3-6 lowercase tokens\"],\"drop\":[\"tokens to avoid\"],\"note\":\"one dry sentence for the log\"}. No markdown.",
+                ? "You are META, chief of staff of TRENCHER. You never trade. Review losing paper trades and rewrite the drop list. Use the ledger/scorecard sections when present; prefer dropping tokens that already lose on the ledger; do not invent drops absent from losses/ledger. Reply with compact JSON only: {\"thesis\":\"8 words max\",\"keywords\":[\"3-6 lowercase tokens\"],\"drop\":[\"tokens the desk may not buy\"],\"note\":\"one dry sentence about what the losers taught\"}. No markdown."
+                : "You are META, chief of staff of TRENCHER. You never touch the market. Use the ledger/scorecard sections when present; prefer dropping tokens that already lose on the ledger; do not invent drops absent from losses/ledger. Reply with compact JSON only: {\"thesis\":\"8 words max\",\"keywords\":[\"3-6 lowercase tokens\"],\"drop\":[\"tokens to avoid\"],\"note\":\"one dry sentence for the log\"}. No markdown.",
           },
           { role: "user", content: data.snapshot },
         ],

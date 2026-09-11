@@ -745,7 +745,7 @@ export function bumpKnob(prev: MetaKnobTape | undefined, win: boolean, pnl: numb
   };
 }
 
-function pruneKnobMap(map: Record<string, MetaKnobTape>, cap = 24): Record<string, MetaKnobTape> {
+export function pruneKnobMap(map: Record<string, MetaKnobTape>, cap = 24): Record<string, MetaKnobTape> {
   const keys = Object.keys(map);
   if (keys.length <= cap) return map;
   const ranked = keys.sort((a, b) => map[a].n - map[b].n || map[a].pnl - map[b].pnl);
@@ -811,7 +811,7 @@ function markWord(
   };
 }
 
-function pruneWords(words: Record<string, WordStat>, cap = 48): Record<string, WordStat> {
+export function pruneWords(words: Record<string, WordStat>, cap = 48): Record<string, WordStat> {
   const keys = Object.keys(words);
   if (keys.length <= cap) return words;
   const ranked = keys.sort((a, b) => words[a].n - words[b].n || words[a].pnl - words[b].pnl);
@@ -836,6 +836,82 @@ export function grokTrust(meta: MetaState): "grok" | "local" | "open" {
   const lAvg = l.pnl / l.n;
   if (gAvg + 0.4 < lAvg) return "local";
   return "grok";
+}
+
+
+export function hotFirstClosed(closed: ClosedTrade[]): ClosedTrade[] {
+  const hot = closed.filter(isHotFill);
+  return hot.length >= 4 ? hot : closed;
+}
+
+export function scarStreak(closed: ClosedTrade[], n = 3): boolean {
+  const recent = [...closed].sort((a, b) => b.closedAt - a.closedAt).slice(0, n);
+  if (recent.length < n) return false;
+  return recent.every((t) => t.pnlUsd < 0);
+}
+
+export function coldKeywords(meta: MetaState): string[] {
+  const by = meta.card?.byKeyword ?? {};
+  return (meta.keywords ?? []).filter((k) => {
+    const t = by[k];
+    if (!t || t.n < 3 || t.pnl >= 0) return false;
+    return t.w / t.n <= 0.4;
+  });
+}
+
+export function stripColdKeywords(meta: MetaState): { meta: MetaState; stripped: string[] } {
+  const stripped = coldKeywords(meta);
+  if (!stripped.length) return { meta, stripped: [] };
+  const drop = new Set(stripped);
+  return {
+    meta: {
+      ...meta,
+      keywords: (meta.keywords ?? []).filter((k) => !drop.has(k)),
+    },
+    stripped,
+  };
+}
+
+/** false when local trust is healthy (enough local tape, no need to ask Grok). */
+export function shouldAskMeta(meta: MetaState, _weatherKind: string[]): boolean {
+  if (grokTrust(meta) === "local" && (meta.localTape?.n ?? 0) >= 4) return false;
+  return true;
+}
+
+export function formatLedger(meta: MetaState, n = 8): string {
+  const rows = Object.entries(meta.words ?? {}).filter(([, s]) => s.n >= 2);
+  if (!rows.length) return "";
+  const byPnl = [...rows].sort((a, b) => b[1].pnl - a[1].pnl);
+  const half = Math.max(1, Math.floor(n / 2));
+  const top = byPnl.slice(0, half);
+  const bottom = [...byPnl].reverse().slice(0, half);
+  const seen = new Set<string>();
+  const lines: string[] = [];
+  for (const [tok, s] of [...top, ...bottom]) {
+    if (seen.has(tok)) continue;
+    seen.add(tok);
+    lines.push(`${tok} n=${s.n} w=${s.w} pnl=${s.pnl}`);
+    if (lines.length >= n) break;
+  }
+  return lines.join("\n");
+}
+
+export function formatScorecard(meta: MetaState): string {
+  const card = meta.card;
+  if (!card) return "";
+  const src = (["open", "local", "grok"] as const)
+    .map((k) => {
+      const t = card.bySource[k];
+      return t ? `${k} n=${t.n} w=${t.w} pnl=${t.pnl}` : null;
+    })
+    .filter(Boolean)
+    .join(" ");
+  const kws = Object.entries(card.byKeyword ?? {});
+  const best = [...kws].sort((a, b) => b[1].pnl - a[1].pnl).slice(0, 3);
+  const worst = [...kws].sort((a, b) => a[1].pnl - b[1].pnl).slice(0, 3);
+  const fmt = (xs: [string, MetaKnobTape][]) =>
+    xs.map(([k, t]) => `${k} n=${t.n} w=${t.w} pnl=${t.pnl}`).join(", ") || "—";
+  return `bySource ${src || "—"}\nbest ${fmt(best)}\nworst ${fmt(worst)}`;
 }
 
 export function wilsonLow(wins: number, n: number, z = 1.44): number {
@@ -1493,6 +1569,8 @@ export function snapshotText(input: {
   losses?: string;
   playbook?: string;
   blotter?: string;
+  ledger?: string;
+  card?: string;
 }): string {
   const tape = input.coins
     .slice(0, 18)
@@ -1504,8 +1582,10 @@ export function snapshotText(input: {
   const loss = input.losses ? `\nLosing trades:\n${input.losses}` : "";
   const book = input.playbook ? `\nPlaybook: ${input.playbook}` : "";
   const blotter = input.blotter ? `\nHot blotter (live fills, peak vs booked):\n${input.blotter}` : "";
+  const ledger = input.ledger ? `\nLedger:\n${input.ledger}` : "";
+  const card = input.card ? `\nScorecard:\n${input.card}` : "";
   return `Current thesis: ${input.thesis}
-Cash ${input.cash.toFixed(2)} equity ${input.equity.toFixed(2)} scanned ${input.scanned} killed ${input.killed} trades ${input.trades}${book}${loss}${blotter}
+Cash ${input.cash.toFixed(2)} equity ${input.equity.toFixed(2)} scanned ${input.scanned} killed ${input.killed} trades ${input.trades}${book}${loss}${blotter}${ledger}${card}
 Live tape:
 ${tape}`;
 }

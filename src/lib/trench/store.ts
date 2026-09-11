@@ -37,6 +37,13 @@ import {
   sizeByScore,
   snapshotText,
   formatBlotter,
+  formatLedger,
+  formatScorecard,
+  hotFirstClosed,
+  scarStreak,
+  coldKeywords,
+  stripColdKeywords,
+  shouldAskMeta,
   isHotFill,
   scarSit,
   minClip,
@@ -64,7 +71,7 @@ import { ntfyHeartbeat, pingNtfy } from "./ntfy";
 import { gmgnKey } from "./gmgn";
 import { amHunter, deskPin, syncCloud } from "./cloud";
 import { LIVE_CAP_ETH, LIVE_CAP_SOL, LIVE_ETH_USD, ethHotBuy, ethHotSell, flattenHot as flattenHotBags, hotAutoArmed, hotBuy, hotSell, isLiveMint, refreshEthHot, refreshHot, shadowQuote, signOneBuy, signOneState } from "./wallet";
-import { canonHasBlood, canonToPlaybook } from "./canon";
+import { canonHasBlood, canonToMetaSeed, canonToPlaybook } from "./canon";
 import { useSpirit } from "./spirit";
 import {
   AGENTS,
@@ -1204,10 +1211,42 @@ export const useTrench = create<TrenchState>()(
           ...(s.rival?.closed ?? []),
           ...(s.extra?.closed ?? []),
         ];
-        const hot = allClosed.filter(isHotFill);
-        const pool = hot.length >= 4 ? hot : allClosed;
+        const pool = hotFirstClosed(allClosed);
         const losses = pool.filter((t) => t.pnlUsd < 0);
-        if (losses.length >= 2 && now - (s.meta.updatedAt || 0) > 10 * 60_000) {
+        const weatherKind = s.weather?.kind ?? [];
+        const stale = now - (s.meta.updatedAt || 0) > 10 * 60_000;
+        const regime =
+          weatherKind.includes("died") || weatherKind.includes("rip");
+
+        if (coldKeywords(s.meta).length) {
+          const { meta, stripped } = stripColdKeywords(s.meta);
+          set({ meta });
+          log(
+            "META",
+            "sys",
+            `stripped cold keywords: ${stripped.join(", ")}.`,
+          );
+          if (losses.length >= 2) {
+            void get().readLosers();
+            return;
+          }
+        }
+
+        if (scarStreak(pool, 3)) {
+          void get().readLosers();
+          return;
+        }
+
+        if (!shouldAskMeta(s.meta, weatherKind)) {
+          return;
+        }
+
+        if (regime && stale) {
+          void get().askMeta();
+          return;
+        }
+
+        if (losses.length >= 2 && stale) {
           void get().readLosers();
         } else {
           void get().askMeta();
@@ -1539,16 +1578,18 @@ export const useTrench = create<TrenchState>()(
                 }
               : blankPlaybook();
           const keepWords = get().meta;
+          const seed = fromSpirit ? canonToMetaSeed(spirit) : {};
           const meta: MetaState = fromSpirit
             ? {
-                thesis: spirit.thesis || "open book",
-                keywords: [...spirit.keywords],
-                drop: [...spirit.drop],
-                source: spirit.thesis && spirit.thesis !== "open book" ? "local" : "open",
+                thesis: seed.thesis || spirit.thesis || "open book",
+                keywords: [...(seed.keywords ?? spirit.keywords)],
+                drop: [...(seed.drop ?? spirit.drop)],
+                source: seed.source ?? (spirit.thesis && spirit.thesis !== "open book" ? "local" : "open"),
                 updatedAt: now,
-                words: keepWords.words,
-                grokTape: keepWords.grokTape,
-                localTape: keepWords.localTape,
+                words: seed.words ?? keepWords.words,
+                card: seed.card ?? keepWords.card,
+                grokTape: seed.grokTape ?? keepWords.grokTape,
+                localTape: seed.localTape ?? keepWords.localTape,
               }
             : inherited
               ? {
@@ -1558,6 +1599,7 @@ export const useTrench = create<TrenchState>()(
                   source: prev.thesis && prev.thesis !== "open book" ? "local" : "open",
                   updatedAt: now,
                   words: keepWords.words,
+                  card: keepWords.card,
                   grokTape: keepWords.grokTape,
                   localTape: keepWords.localTape,
                 }
@@ -2847,6 +2889,8 @@ export const useTrench = create<TrenchState>()(
                   (a, b) => b.closedAt - a.closedAt,
                 ),
               ),
+              ledger: formatLedger(s.meta),
+              card: formatScorecard(s.meta),
             });
             const res = await consultMeta({ data: { snapshot: snap, mode: "thesis" } });
             if (!res.ok) {
@@ -2935,6 +2979,8 @@ ${tapeHay}`),
                   (a, b) => b.closedAt - a.closedAt,
                 ),
               ),
+              ledger: formatLedger(s.meta),
+              card: formatScorecard(s.meta),
             });
             const res = await consultMeta({ data: { snapshot: snap, mode: "review" } });
             if (!res.ok) {
@@ -3031,6 +3077,7 @@ ${tapeHay}`),
             source: "local",
             updatedAt: Date.now(),
             words: metaIn.words && typeof metaIn.words === "object" ? metaIn.words : {},
+            card: metaIn.card && typeof metaIn.card === "object" ? metaIn.card : undefined,
             grokTape: metaIn.grokTape,
             localTape: metaIn.localTape,
           };

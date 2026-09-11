@@ -176,7 +176,16 @@ async function createSql(): Promise<Sql> {
         "or a server route loader, never from client code.",
     );
   }
-  return dbSource === "neon" ? createNeonSql() : createPgliteSql();
+  if (dbSource === "neon") return createNeonSql();
+  // DigitalOcean / Docker sets NODE_ENV=production. Embedded PGLite has no
+  // durable file in the image (ENOENT …/pglite.data) and cannot sync chambers
+  // across devices — require shared Postgres instead of failing opaquely.
+  if (typeof process !== "undefined" && process.env.NODE_ENV === "production") {
+    throw new Error(
+      "DATABASE_URL is required in production. Set it on DigitalOcean so Chamber can use shared Postgres.",
+    );
+  }
+  return createPgliteSql();
 }
 
 /**

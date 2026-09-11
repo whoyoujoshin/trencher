@@ -1,1 +1,1 @@
-@file:///workspace/trencher-patch/terminal.tsx
+/workspace/trencher-patch/terminal.tsx

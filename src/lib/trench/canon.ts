@@ -87,7 +87,7 @@ export function mergeCanon(canon: SpiritCanon, book: BookFile | null | undefined
       : incomingThesis || canon.thesis;
   return {
     scoreFloor: Math.max(canon.scoreFloor, play.scoreFloor ?? 0),
-    stopPct: Math.max(canon.stopPct, play.stopPct ?? canon.stopPct),
+    stopPct: Math.min(canon.stopPct, play.stopPct ?? canon.stopPct),
     takePct: Math.min(canon.takePct, play.takePct ?? canon.takePct),
     socialBias: Math.max(canon.socialBias, play.socialBias ?? 0),
     bannedCreators: uniq([...canon.bannedCreators, ...(play.bannedCreators ?? [])]),

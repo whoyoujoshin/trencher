@@ -58,6 +58,7 @@ import {
   onParole,
   hotLiveBlock,
   stampDayHits,
+  matchedMetaTokens,
 } from "./logic";
 import { ntfyHeartbeat, pingNtfy } from "./ntfy";
 import { gmgnKey } from "./gmgn";
@@ -782,6 +783,7 @@ export const useTrench = create<TrenchState>()(
           rail: stampRail(p.mint, livePos),
           peakPct,
           metaSource: p.metaSource ?? st.meta.source,
+          metaHits: p.metaHits,
           settled: livePos ? "pending" : undefined,
           liveCostUsd: livePos ? p.liveCostUsd ?? liveNotional(p.mint) : undefined,
         };
@@ -2297,6 +2299,7 @@ export const useTrench = create<TrenchState>()(
                 slipPct,
                 feeUsd,
                 metaSource: st.meta.source,
+                metaHits: matchedMetaTokens(coin, st.meta),
               };
 
               log(
@@ -2438,6 +2441,7 @@ export const useTrench = create<TrenchState>()(
                   slipPct,
                   feeUsd,
                   metaSource: st.meta.source,
+                  metaHits: matchedMetaTokens(coin, st.meta),
                 };
                 log(
                   "RISK",
@@ -2568,6 +2572,7 @@ export const useTrench = create<TrenchState>()(
                   slipPct,
                   feeUsd,
                   metaSource: st.meta.source,
+                  metaHits: matchedMetaTokens(coin, st.meta),
                 };
                 log(
                   "RISK",

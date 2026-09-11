@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { absorbKill, absorbTrade, blankPlaybook, cheapKill, clipsInDay, decideSell, emptyPrint, exitMcap, formatWeather, gmgnLine, gmgnVeto, grokTrust, hotLiveBlock, isHotFill, liveFloor, paperFloor, pickHotLane, ponsWake, regimeShift, scarSit, scoreSetup, setupMatch, sizeByScore, stampDayHits, takeWindow, tapeHeat, trailSpec, windowPrint, wilsonLow, wordShouldDrop, writeWeather } from "./logic.ts";
+import { absorbKill, absorbTrade, blankPlaybook, blankScorecard, cheapKill, clipsInDay, decideSell, emptyPrint, exitMcap, formatWeather, gmgnLine, gmgnVeto, grokTrust, hotLiveBlock, isHotFill, liveFloor, paperFloor, pickHotLane, ponsWake, regimeShift, scarSit, scoreSetup, setupMatch, sizeByScore, stampDayHits, takeWindow, tapeHeat, trailSpec, windowPrint, wilsonLow, wordEdge, wordShouldDrop, writeWeather } from "./logic.ts";
 import { blankWeather, stampRail } from "./types.ts";
 import type { ClosedTrade, MetaState, PumpCoin } from "./types.ts";
 
@@ -756,5 +756,110 @@ describe("self-teach", () => {
       updatedAt: Date.now(),
     };
     assert.equal(setupMatch(c, local, Date.now()), null);
+  });
+});
+
+describe("meta scorecard", () => {
+  function trade(over: Partial<ClosedTrade> = {}): ClosedTrade {
+    return {
+      mint: "m1",
+      symbol: "DOGE",
+      name: "Doge Coin",
+      creator: "walletA",
+      costUsd: 8,
+      proceedsUsd: 6,
+      pnlUsd: -2,
+      pnlPct: -0.18,
+      reason: "stop",
+      heldMs: 20_000,
+      openedAt: Date.now() - 20_000,
+      closedAt: Date.now(),
+      score: 50,
+      slipPct: 0,
+      feeUsd: 0.1,
+      peakPct: 0.02,
+      metaSource: "local",
+      metaHits: ["doge"],
+      ...over,
+    };
+  }
+
+  it("wordEdge is ~0 for n=1, positive for winners, negative for losers", () => {
+    assert.equal(wordEdge({ n: 1, w: 1, pnl: 4 }), 0);
+    const win = wordEdge({ n: 4, w: 3, pnl: 12 });
+    assert.ok(win > 0, `winner edge ${win}`);
+    const lose = wordEdge({ n: 4, w: 1, pnl: -8 });
+    assert.ok(lose < 0, `loser edge ${lose}`);
+  });
+
+  it("scoreSetup scars a ledger-known token vs a clean twin", () => {
+    const now = Date.now();
+    const scarred: MetaState = {
+      thesis: "open",
+      keywords: [],
+      drop: [],
+      source: "local",
+      updatedAt: now,
+      words: { doge: { n: 4, w: 1, pnl: -8 } },
+    };
+    const clean: MetaState = {
+      thesis: "open",
+      keywords: [],
+      drop: [],
+      source: "local",
+      updatedAt: now,
+      words: {},
+    };
+    const base = coin({
+      venue: "pump",
+      mint: "So1anaMint1111111111111111111111111111111",
+      name: "Doge Rocket",
+      symbol: "DOGE",
+      description: "a doge on pump",
+      usdMcap: 64_000,
+      replyCount: 2,
+      twitter: "https://x.com/doge",
+    });
+    const a = scoreSetup(base, scarred, now);
+    const b = scoreSetup(base, clean, now);
+    assert.ok(a.score < b.score, `scarred ${a.score} vs clean ${b.score}`);
+  });
+
+  it("absorbTrade populates card bySource.local and byKeyword", () => {
+    const meta: MetaState = {
+      thesis: "dog memes",
+      keywords: ["doge"],
+      drop: [],
+      source: "local",
+      updatedAt: 0,
+    };
+    const out = absorbTrade(trade({ metaSource: "local", metaHits: ["doge"], pnlUsd: -2 }), blankPlaybook(), meta);
+    assert.ok(out.meta.card);
+    assert.ok((out.meta.card!.bySource.local?.n ?? 0) >= 1);
+    assert.ok((out.meta.card!.byKeyword.doge?.n ?? 0) >= 1);
+  });
+
+  it("hot fill weights the scorecard more than paper", () => {
+    const meta: MetaState = {
+      thesis: "open",
+      keywords: [],
+      drop: [],
+      source: "local",
+      updatedAt: 0,
+      card: blankScorecard(),
+    };
+    const loss = { pnlUsd: -3, metaHits: ["doge"], metaSource: "local" as const };
+    const paper = absorbTrade(trade({ ...loss, rail: "paper", mint: "p1" }), blankPlaybook(), meta);
+    const hot = absorbTrade(
+      trade({ ...loss, rail: "sol", mint: "h1" }),
+      blankPlaybook(),
+      { ...meta, card: blankScorecard() },
+    );
+    const paperTape = paper.meta.card!.bySource.local!;
+    const hotTape = hot.meta.card!.bySource.local!;
+    assert.ok(
+      hotTape.n > paperTape.n || Math.abs(hotTape.pnl) > Math.abs(paperTape.pnl),
+      `hot n=${hotTape.n} pnl=${hotTape.pnl} vs paper n=${paperTape.n} pnl=${paperTape.pnl}`,
+    );
   });
 });

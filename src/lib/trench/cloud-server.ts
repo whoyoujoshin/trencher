@@ -10,14 +10,36 @@ function hashPin(pin: string): string {
   return createHash("sha256").update(`trencher-desk:${pin}`).digest("hex");
 }
 
+function chamberFault(err: unknown): string {
+  const msg = err instanceof Error ? err.message : String(err ?? "unknown");
+  const lower = msg.toLowerCase();
+  if (
+    /database_url|econnrefused|enotfound|connection|password authentication|no pg|enoent|pglite\.data/i.test(
+      lower,
+    )
+  ) {
+    return "chamber DB offline. set DATABASE_URL on DigitalOcean (shared Postgres).";
+  }
+  if (/trench_desk|does not exist|undefined_table|undefined_column/i.test(lower)) {
+    return "chamber table missing. redeploy so migrate runs.";
+  }
+  return `chamber fault: ${msg}`.slice(0, 140);
+}
+
 let eyesReady: Promise<void> | null = null;
 
 async function ensureEyes(sql: Awaited<ReturnType<typeof getSql>>) {
-  eyesReady ??= sql
-    .query(
-      "alter table trench_desk add column if not exists eyes jsonb not null default '{}'::jsonb",
-    )
-    .then(() => undefined);
+  if (!eyesReady) {
+    eyesReady = sql
+      .query(
+        "alter table trench_desk add column if not exists eyes jsonb not null default '{}'::jsonb",
+      )
+      .then(() => undefined)
+      .catch((err) => {
+        eyesReady = null;
+        throw err;
+      });
+  }
   await eyesReady;
 }
 
@@ -38,7 +60,11 @@ function asEyes(raw: unknown): Record<string, unknown> {
   return {};
 }
 
-function pruneEyes(raw: unknown, eyeId: string, hunterId: string | null): { json: string; watching: number } {
+function pruneEyes(
+  raw: unknown,
+  eyeId: string,
+  hunterId: string | null,
+): { json: string; watching: number } {
   const now = Date.now();
   const cutoff = now - EYE_TTL;
   const next: Record<string, number> = {};
@@ -63,45 +89,49 @@ export const pullDesk = createServerFn({ method: "POST" })
     eyeId: String(input.eyeId ?? input.hunterId ?? "").slice(0, 80),
   }))
   .handler(async ({ data }) => {
-    if (data.pin.length < 4) return { ok: false as const, error: "chamber # too short" };
-    const sql = await getSql();
-    await ensureEyes(sql);
-    const pinHash = hashPin(data.pin);
-    const rows = await sql<{
-      id: string;
-      blob: string;
-      pin_hash: string;
-      hunter_id: string | null;
-      hunter_until: string | null;
-      eyes: unknown;
-    }>`select id, blob, pin_hash, hunter_id, hunter_until, eyes from trench_desk where id = ${pinHash} or (id = ${"main"} and pin_hash = ${pinHash}) limit 1`;
-    const row = rows[0];
-    if (!row) return { ok: false as const, error: "no chamber yet. host it from the live tab." };
-    if (row.pin_hash !== pinHash) return { ok: false as const, error: "wrong chamber #." };
-    const until = row.hunter_until ? Date.parse(row.hunter_until) : 0;
-    const mine =
-      !row.hunter_id ||
-      !until ||
-      until < Date.now() ||
-      row.hunter_id === data.hunterId;
-    if (mine && data.hunterId) {
-      const next = new Date(Date.now() + HUNTER_MS).toISOString();
-      await sql`
-        update trench_desk
-        set hunter_id = ${data.hunterId}, hunter_until = ${next}
-        where id = ${row.id} and pin_hash = ${row.pin_hash}
-      `;
+    try {
+      if (data.pin.length < 4) return { ok: false as const, error: "chamber # too short" };
+      const sql = await getSql();
+      await ensureEyes(sql);
+      const pinHash = hashPin(data.pin);
+      const rows = await sql<{
+        id: string;
+        blob: string;
+        pin_hash: string;
+        hunter_id: string | null;
+        hunter_until: string | null;
+        eyes: unknown;
+      }>`select id, blob, pin_hash, hunter_id, hunter_until, eyes from trench_desk where id = ${pinHash} or (id = ${"main"} and pin_hash = ${pinHash}) limit 1`;
+      const row = rows[0];
+      if (!row) return { ok: false as const, error: "no chamber yet. host it from the live tab." };
+      if (row.pin_hash !== pinHash) return { ok: false as const, error: "wrong chamber #." };
+      const until = row.hunter_until ? Date.parse(row.hunter_until) : 0;
+      const mine =
+        !row.hunter_id ||
+        !until ||
+        until < Date.now() ||
+        row.hunter_id === data.hunterId;
+      if (mine && data.hunterId) {
+        const next = new Date(Date.now() + HUNTER_MS).toISOString();
+        await sql`
+          update trench_desk
+          set hunter_id = ${data.hunterId}, hunter_until = ${next}
+          where id = ${row.id} and pin_hash = ${row.pin_hash}
+        `;
+      }
+      const hunterKey = mine ? data.hunterId : row.hunter_id;
+      const presence = mine ? data.hunterId : data.eyeId;
+      const { json, watching } = pruneEyes(row.eyes, presence, hunterKey);
+      await sql.query("update trench_desk set eyes = $1::jsonb where id = $2", [json, row.id]);
+      return {
+        ok: true as const,
+        blob: row.blob,
+        hunter: mine,
+        watching,
+      };
+    } catch (err) {
+      return { ok: false as const, error: chamberFault(err) };
     }
-    const hunterKey = mine ? data.hunterId : row.hunter_id;
-    const presence = mine ? data.hunterId : data.eyeId;
-    const { json, watching } = pruneEyes(row.eyes, presence, hunterKey);
-    await sql`update trench_desk set eyes = ${json}::jsonb where id = ${row.id}`;
-    return {
-      ok: true as const,
-      blob: row.blob,
-      hunter: mine,
-      watching,
-    };
   });
 
 export const pushDesk = createServerFn({ method: "POST" })
@@ -119,52 +149,58 @@ export const pushDesk = createServerFn({ method: "POST" })
     force: input.force === true,
   }))
   .handler(async ({ data }) => {
-    if (data.pin.length < 4) return { ok: false as const, error: "chamber # too short" };
-    if (!data.blob) return { ok: false as const, error: "empty desk" };
-    const sql = await getSql();
-    await ensureEyes(sql);
-    const pinHash = hashPin(data.pin);
-    const rows = await sql<{
-      id: string;
-      pin_hash: string;
-      hunter_id: string | null;
-      hunter_until: string | null;
-      eyes: unknown;
-    }>`
-      select id, pin_hash, hunter_id, hunter_until, eyes from trench_desk
-      where id = ${pinHash} or (id = ${"main"} and pin_hash = ${pinHash})
-      limit 1
-    `;
-    const existing = rows[0];
-    if (existing && existing.pin_hash !== pinHash) {
-      return { ok: false as const, error: "wrong chamber #." };
-    }
-    const heldUntil = existing?.hunter_until ? Date.parse(existing.hunter_until) : 0;
-    const held =
-      !!existing?.hunter_id &&
-      heldUntil > Date.now() &&
-      existing.hunter_id !== data.hunterId;
-    if (held && !data.force) {
-      return { ok: false as const, error: "another tab is the hunter.", hunter: false, watching: 0 };
-    }
-    const until = new Date(Date.now() + HUNTER_MS).toISOString();
-    const deskId = existing?.id ?? pinHash;
-    const { json, watching } = pruneEyes(existing?.eyes, data.hunterId, data.hunterId);
-    if (!existing) {
-      await sql`
-        insert into trench_desk (id, pin_hash, blob, hunter_id, hunter_until, eyes, updated_at)
-        values (${deskId}, ${pinHash}, ${data.blob}, ${data.hunterId || null}, ${until}, ${json}::jsonb, now())
+    try {
+      if (data.pin.length < 4) return { ok: false as const, error: "chamber # too short" };
+      if (!data.blob) return { ok: false as const, error: "empty desk" };
+      const sql = await getSql();
+      await ensureEyes(sql);
+      const pinHash = hashPin(data.pin);
+      const rows = await sql<{
+        id: string;
+        pin_hash: string;
+        hunter_id: string | null;
+        hunter_until: string | null;
+        eyes: unknown;
+      }>`
+        select id, pin_hash, hunter_id, hunter_until, eyes from trench_desk
+        where id = ${pinHash} or (id = ${"main"} and pin_hash = ${pinHash})
+        limit 1
       `;
-    } else {
-      await sql`
-        update trench_desk
-        set blob = ${data.blob},
-            hunter_id = ${data.hunterId || null},
-            hunter_until = ${until},
-            eyes = ${json}::jsonb,
-            updated_at = now()
-        where id = ${deskId} and pin_hash = ${pinHash}
-      `;
+      const existing = rows[0];
+      if (existing && existing.pin_hash !== pinHash) {
+        return { ok: false as const, error: "wrong chamber #." };
+      }
+      const heldUntil = existing?.hunter_until ? Date.parse(existing.hunter_until) : 0;
+      const held =
+        !!existing?.hunter_id &&
+        heldUntil > Date.now() &&
+        existing.hunter_id !== data.hunterId;
+      if (held && !data.force) {
+        return { ok: false as const, error: "another tab is the hunter.", hunter: false, watching: 0 };
+      }
+      const until = new Date(Date.now() + HUNTER_MS).toISOString();
+      const deskId = existing?.id ?? pinHash;
+      const { json, watching } = pruneEyes(existing?.eyes, data.hunterId, data.hunterId);
+      if (!existing) {
+        await sql.query(
+          `insert into trench_desk (id, pin_hash, blob, hunter_id, hunter_until, eyes, updated_at)
+           values ($1, $2, $3, $4, $5, $6::jsonb, now())`,
+          [deskId, pinHash, data.blob, data.hunterId || null, until, json],
+        );
+      } else {
+        await sql.query(
+          `update trench_desk
+           set blob = $1,
+               hunter_id = $2,
+               hunter_until = $3,
+               eyes = $4::jsonb,
+               updated_at = now()
+           where id = $5 and pin_hash = $6`,
+          [data.blob, data.hunterId || null, until, json, deskId, pinHash],
+        );
+      }
+      return { ok: true as const, hunter: true, watching };
+    } catch (err) {
+      return { ok: false as const, error: chamberFault(err), hunter: false, watching: 0 };
     }
-    return { ok: true as const, hunter: true, watching };
   });

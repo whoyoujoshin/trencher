@@ -689,4 +689,72 @@ describe("self-teach", () => {
     assert.equal(isHotFill({ rail: "paper" }), false);
     assert.equal(isHotFill({ rail: "sol" }), true);
   });
+
+  it("decideSell takes on written takePct even if trail is not armed", () => {
+    const now = Date.now();
+    const reason = decideSell(
+      {
+        costUsd: 15,
+        entryMcap: 5000,
+        lastMcap: 9500,
+        peakMcap: 9500,
+        openedAt: now - 20_000,
+        stopPct: -0.5,
+        takePct: 0.9,
+      },
+      now,
+      { ...blankPlaybook(), stopPct: -0.5, takePct: 0.9 },
+      "pump",
+    );
+    assert.equal(reason, "take");
+  });
+
+  it("absorbTrade does not ban creator on a time (pulse) loss", () => {
+    const out = absorbTrade(
+      trade({ reason: "time", peakPct: 0.02, pnlUsd: -0.5, pnlPct: -0.05 }),
+      blankPlaybook(),
+      meta,
+    );
+    assert.equal(out.playbook.bannedCreators.includes("walletA"), false);
+    assert.equal(out.lessons.some((l) => l.agent === "WARDEN"), false);
+  });
+
+  it("absorbTrade bans only after evidence: skip first green-stop, ban on second loss", () => {
+    const first = absorbTrade(
+      trade({ reason: "stop", peakPct: 0.2, mint: "m-a" }),
+      blankPlaybook(),
+      meta,
+    );
+    assert.equal(first.playbook.bannedCreators.includes("walletA"), false);
+    const second = absorbTrade(
+      trade({ reason: "stop", peakPct: 0.15, mint: "m-b", pnlUsd: -1 }),
+      first.playbook,
+      meta,
+      [trade({ reason: "stop", peakPct: 0.2, mint: "m-a" })],
+    );
+    assert.ok(second.playbook.bannedCreators.includes("walletA"));
+    assert.ok(second.lessons.some((l) => l.agent === "WARDEN" && l.text.includes("burned")));
+  });
+
+  it("setupMatch does not veto a lively named coin that misses local keywords", () => {
+    const c = coin({
+      venue: "pump",
+      mint: "So1anaMint1111111111111111111111111111111",
+      name: "Banana Rocket",
+      symbol: "BNNA",
+      description: "just a banana",
+      usdMcap: 64_000,
+      replyCount: 4,
+      lastTradeAt: Date.now(),
+      twitter: "https://x.com/banana",
+    });
+    const local: MetaState = {
+      thesis: "stock memes only",
+      keywords: ["hood", "robinhood", "nasdaq"],
+      drop: [],
+      source: "local",
+      updatedAt: Date.now(),
+    };
+    assert.equal(setupMatch(c, local, Date.now()), null);
+  });
 });

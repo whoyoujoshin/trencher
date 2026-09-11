@@ -375,6 +375,19 @@ function liveBody(r: Rival | null | undefined): r is Rival {
   return !!r && (r.status === "alive" || r.status === "survived");
 }
 
+
+/** Only keep Grok drop tokens grounded in ledger/tape text (or already known). Cap 12. */
+function groundedDrop(existing: string[], incoming: string[], hay: string): string[] {
+  const h = hay.toLowerCase();
+  const keep = incoming.filter((tok) => {
+    const t = (tok ?? "").toLowerCase().trim();
+    if (t.length < 2) return false;
+    if (existing.some((e) => e.toLowerCase() === t)) return true;
+    return h.includes(t);
+  });
+  return Array.from(new Set([...existing, ...keep])).slice(0, 12);
+}
+
 export const useTrench = create<TrenchState>()(
   persist(
     (set, get) => {
@@ -2767,6 +2780,7 @@ export const useTrench = create<TrenchState>()(
                   words: cur.meta.words,
                   grokTape: cur.meta.grokTape,
                   localTape: cur.meta.localTape,
+                  source: cur.meta.source === "open" ? "open" : "local",
                 },
               });
               log(
@@ -2845,13 +2859,21 @@ export const useTrench = create<TrenchState>()(
               );
               return;
             }
+            const tapeHay = s.tape.map((c) => `${c.symbol} ${c.name}`).join(" ");
+            const blotterHay = formatBlotter(
+              [...s.closed, ...(s.rival?.closed ?? []), ...(s.extra?.closed ?? [])].sort(
+                (a, b) => b.closedAt - a.closedAt,
+              ),
+            );
             set({
               grokLastAt: Date.now(),
               meta: {
                 ...s.meta,
                 thesis: res.thesis,
                 keywords: res.keywords,
-                drop: Array.from(new Set([...s.meta.drop, ...res.drop])).slice(0, 12),
+                drop: groundedDrop(s.meta.drop, res.drop, `${snap}
+${blotterHay}
+${tapeHay}`),
                 source: "grok",
                 updatedAt: Date.now(),
               },
@@ -2929,7 +2951,7 @@ export const useTrench = create<TrenchState>()(
                 ...s.meta,
                 thesis: res.thesis || s.meta.thesis,
                 keywords: res.keywords.length ? res.keywords : s.meta.keywords,
-                drop: Array.from(new Set([...s.meta.drop, ...res.drop])).slice(0, 12),
+                drop: groundedDrop(s.meta.drop, res.drop, lossLines),
                 source: grokTrust(s.meta) === "local" ? "local" : "grok",
                 updatedAt: Date.now(),
               },

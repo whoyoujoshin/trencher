@@ -128,13 +128,8 @@ export function setupMatch(coin: PumpCoin, meta: MetaState, now: number): string
   if (coin.usdMcap > HUNT_MCAP_MAX) return "already extended. no chase.";
   if (age > 6 * 60 * 60_000 && !lively) return "stale and quiet.";
 
-  if (meta.source !== "open" && meta.keywords.length) {
-    if (!matchesAny(text, meta.keywords)) {
-      if (!(lively && coin.usdMcap >= 12_000 && hasSocial)) {
-        return `doesn't match ${meta.keywords.slice(0, 3).join("/")}.`;
-      }
-    }
-  } else {
+  // keywords boost via scoreSetup only — no hard veto
+  if (!(meta.source !== "open" && meta.keywords.length)) {
     const quality = hasSocial || lively || coin.description.length > 40;
     if (!quality && coin.usdMcap < 10_000) {
       return "no socials, no replies, thin book.";
@@ -787,13 +782,27 @@ export function absorbTrade(
   const localTape = src === "local" || src === "open" ? bumpTape(meta.localTape, trade.pnlUsd) : meta.localTape;
 
   if (!win) {
-    if (trade.creator && !next.bannedCreators.includes(trade.creator) && !onParole(next, trade.creator)) {
-      next.bannedCreators = [...next.bannedCreators, trade.creator].slice(-40);
-      lessons.push({
-        at: now,
-        agent: "WARDEN",
-        text: `memory: deployer of $${trade.symbol} is burned. next coin from that wallet dies.`,
-      });
+    // evidence-gate: skip pulse (time) dumps; ban only never-ran stops or repeat losses
+    if (
+      trade.reason !== "time" &&
+      trade.creator &&
+      !next.bannedCreators.includes(trade.creator) &&
+      !onParole(next, trade.creator)
+    ) {
+      const neverRan = trade.reason === "stop" && (trade.peakPct ?? 0) < 0.08;
+      const creatorLosses = [trade, ...recent].filter(
+        (t) => t.creator === trade.creator && t.pnlUsd < 0,
+      ).length;
+      if (neverRan || creatorLosses >= 2) {
+        next.bannedCreators = [...next.bannedCreators, trade.creator].slice(-40);
+        lessons.push({
+          at: now,
+          agent: "WARDEN",
+          text: neverRan
+            ? `memory: deployer of $${trade.symbol} never ran. burned. next coin from that wallet dies.`
+            : `memory: deployer of $${trade.symbol} is burned after repeat losses. next coin from that wallet dies.`,
+        });
+      }
     }
     if (next.scoreFloor < SCORE_FLOOR) {
       next.scoreFloor = Math.min(SCORE_FLOOR, next.scoreFloor + (trade.score >= 60 ? 2 : 1));
@@ -1233,6 +1242,7 @@ export function decideSell(
     peakMcap: number;
     openedAt: number;
     stopPct?: number;
+    takePct?: number;
   },
   now: number,
   book: Playbook,
@@ -1245,6 +1255,8 @@ export function decideSell(
   const peakPct = p.entryMcap > 0 ? p.peakMcap / p.entryMcap - 1 : 0;
   const fromPeak = p.peakMcap > 0 ? p.lastMcap / p.peakMcap - 1 : 0;
   if (spec.hard != null && pct >= spec.hard) return "take";
+  const take = p.takePct ?? book.takePct;
+  if (take > 0 && pct >= take) return "take";
   if (peakPct >= spec.arm && fromPeak <= -spec.give) return "take";
   if (peakPct >= spec.arm && pct <= stop) return "take";
   const green = protectSpec(weather);

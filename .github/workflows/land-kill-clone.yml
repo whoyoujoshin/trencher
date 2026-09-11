@@ -1,0 +1,38 @@
+name: land-kill-clone
+on:
+  workflow_dispatch:
+  push:
+    branches: [fix/kill-clone-respawn-v2]
+    paths:
+      - .github/workflows/land-kill-clone.yml
+jobs:
+  land:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/kill-clone-respawn-v2
+          fetch-depth: 20
+      - name: Restore sources and apply kill-clone patches
+        run: |
+          set -euo pipefail
+          git show 0de71ee4c0409db26671f94dae476e46476c7bda:src/components/trench/terminal.tsx > src/components/trench/terminal.tsx
+          if ! grep -q 'killClone:' src/lib/trench/store.ts; then
+            patch -p1 --forward --batch -i patches/kill-clone/store.ts.patch
+          fi
+          if ! grep -q 'killClone' src/components/trench/terminal.tsx; then
+            patch -p1 --forward --batch -i patches/kill-clone/terminal.tsx.patch
+          fi
+          grep -q 'killClone:' src/lib/trench/store.ts
+          grep -q 'killClone' src/components/trench/terminal.tsx
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add src/lib/trench/store.ts src/components/trench/terminal.tsx
+          if git diff --cached --quiet; then
+            echo 'nothing to commit'
+          else
+            git commit -m 'fix(trench): land Kill clone in source (no build patches)'
+            git push origin HEAD:fix/kill-clone-respawn-v2
+          fi

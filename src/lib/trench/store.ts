@@ -195,6 +195,7 @@ type TrenchState = {
   setHydrated: () => void;
   arm: () => void;
   clone: () => void;
+  killClone: () => void;
   payRent: () => void;
   dumpClip: (mint: string) => void;
   dumpRunners: () => void;
@@ -239,7 +240,7 @@ function blankHouse(): House {
 
 function initial(): Omit<
   TrenchState,
-  "setHydrated" | "arm" | "clone" | "payRent" | "dumpClip" | "dumpRunners" | "flattenHot" | "cycle" | "askMeta" | "readLosers" | "snapshotBook" | "ingestBook" | "spawnRival" | "cull" | "setFocus" | "spectate" | "goHome" | "leaveHome" | "setTapeVenue"
+  "setHydrated" | "arm" | "clone" | "killClone" | "payRent" | "dumpClip" | "dumpRunners" | "flattenHot" | "cycle" | "askMeta" | "readLosers" | "snapshotBook" | "ingestBook" | "spawnRival" | "cull" | "setFocus" | "spectate" | "goHome" | "leaveHome" | "setTapeVenue"
 > {
   return {
     hydrated: false,
@@ -1647,7 +1648,39 @@ export const useTrench = create<TrenchState>()(
         },
 
         clone: () => {
+          get().killClone();
+        },
+
+        killClone: () => {
+          const s = get();
+          // Hard reset from dead / stuck / home — absorb scars, then arm a fresh body.
+          if (
+            s.status === "dead" ||
+            s.status === "alive" ||
+            s.status === "survived" ||
+            s.vetDead ||
+            !!s.rival ||
+            !!s.extra ||
+            !!s.startedAt ||
+            (s.scanned ?? 0) > 0
+          ) {
+            try {
+              useSpirit.getState().absorb(get().snapshotBook());
+            } catch {
+              /* spirit optional on blank desk */
+            }
+            const h = s.house ?? blankHouse();
+            if (s.status !== "dead") {
+              set({
+                house: {
+                  ...h,
+                  deaths: (h.deaths ?? 0) + 1,
+                },
+              });
+            }
+          }
           get().arm();
+          log("TILL", "till", `${get().callsign || "body"} · kill clone. new stake. hunting restarted.`);
         },
 
         setFocus: (lane: LaneId) => set({ focus: lane }),

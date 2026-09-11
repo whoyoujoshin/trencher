@@ -1,0 +1,86 @@
+--- a/src/components/trench/terminal.tsx
++++ b/src/components/trench/terminal.tsx
+@@ -216,10 +216,11 @@
+     return <WakeScreen ready={false} />;
+   }
+ 
++  // Dead wins over home — otherwise Kill clone / pay gate never reach the desk.
++  if (status === "dead") return <DeathScreen />;
+   if (atHome || (status === "idle" && !hasCell)) {
+     return <WakeScreen ready hunting={hasCell} eyes={cloudEyes} role={cloudRole} />;
+   }
+-  if (status === "dead") return <DeathScreen />;
+   return <Desk cloudRole={cloudRole} eyes={cloudEyes} />;
+ }
+ 
+@@ -822,7 +823,9 @@
+ }
+ 
+ function DeathScreen() {
+-  const clone = useTrench((s) => s.clone);
++  const killClone = useTrench((s) => s.killClone);
++  const callsign = useTrench((s) => s.callsign);
++  const rival = useTrench((s) => s.rival);
+   const scanned = useTrench((s) => s.scanned);
+   const killed = useTrench((s) => s.killed);
+   const closed = useTrench((s) => s.closed);
+@@ -835,13 +838,17 @@
+   const wins = closed.filter((t) => t.pnlUsd > 0).length;
+   const held = startedAt && diedAt ? elapsed(startedAt, diedAt) : "—";
+   const rank = deskMastery({ lessons, killed, closed, rentPaid, startedAt, now: diedAt ?? Date.now() });
++  const deadSign =
++    rival?.status === "dead" && rival.callsign
++      ? rival.callsign
++      : callsign || `Clone ${house?.generation || 1}`;
+ 
+   return (
+     <main className="flex min-h-dvh flex-col justify-center bg-bg px-5 py-10 sm:px-10">
+       <div className="mx-auto w-full max-w-lg">
+         <p className="font-mono text-2xs tracking-kicker text-loss uppercase">kill rule</p>
+         <h1 className="mt-3 text-display font-semibold leading-[0.88] tracking-[-0.04em]">
+-          Clone {house?.generation || 1} deleted
++          {deadSign} DEAD
+         </h1>
+         <p className="mt-4 max-w-md text-sm leading-relaxed text-muted text-pretty">
+           Balance hit zero. This clone is gone. Scanned {scanned.toLocaleString()} launches,
+@@ -852,12 +859,12 @@
+           Cash dies. Memory does not — if you save the book. This window is not a vault.
+         </p>
+         <div className="mt-8 flex flex-col gap-3 sm:flex-row sm:items-center sm:flex-wrap">
+-          <Button size="lg" onClick={() => clone()}>
+-            Wake the next one
++          <Button size="lg" onClick={() => killClone()}>
++            Kill clone
+           </Button>
+           <BookDock />
+           <p className="font-mono text-2xs text-subtle">
+-            New {formatUsd(STARTING_CASH, 0)}. Same book — if you saved it.
++            New {formatUsd(STARTING_CASH, 0)}. Spirit carries. Hunting restarts.
+           </p>
+         </div>
+       </div>
+@@ -898,6 +905,7 @@
+   const focus = useTrench((s) => s.focus);
+   const spawnRival = useTrench((s) => s.spawnRival);
+   const cull = useTrench((s) => s.cull);
++  const killClone = useTrench((s) => s.killClone);
+   const setFocus = useTrench((s) => s.setFocus);
+   const goHome = useTrench((s) => s.goHome);
+   const rentPaid = useTrench((s) => s.rentPaid);
+@@ -1316,6 +1324,16 @@
+               Cull {focusSign}
+             </Button>
+           ) : null}
++          {status !== "watch" ? (
++            <Button
++              size="sm"
++              variant={!vetLive && !hatchLive && !cubLive ? "primary" : "ghost"}
++              onClick={() => killClone()}
++              title="End this cell. New callsign. Spirit stays. Hunting restarts."
++            >
++              Kill clone
++            </Button>
++          ) : null}
+           <Button
+             size="sm"
+             variant={canPay ? "primary" : "quiet"}

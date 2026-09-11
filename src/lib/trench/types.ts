@@ -78,6 +78,7 @@ export type Position = {
   live?: boolean;
   liveCostUsd?: number;
   metaSource?: "open" | "local" | "grok";
+  metaHits?: string[];
 };
 
 export type ClosedTrade = {
@@ -99,6 +100,7 @@ export type ClosedTrade = {
   rail?: Rail;
   peakPct?: number;
   metaSource?: "open" | "local" | "grok";
+  metaHits?: string[];
   settled?: "pending" | "yes" | "no";
   tx?: string;
   liveCostUsd?: number;
@@ -121,6 +123,15 @@ export type AgentPulse = {
   acts: number;
 };
 
+export type MetaKnobTape = { n: number; w: number; pnl: number };
+
+export type MetaScorecard = {
+  bySource: Partial<Record<"open" | "local" | "grok", MetaKnobTape>>;
+  byThesis: Record<string, MetaKnobTape>;
+  byKeyword: Record<string, MetaKnobTape>;
+  updatedAt: number;
+};
+
 export type MetaState = {
   thesis: string;
   keywords: string[];
@@ -130,6 +141,7 @@ export type MetaState = {
   words?: Record<string, WordStat>;
   grokTape?: SourceTape;
   localTape?: SourceTape;
+  card?: MetaScorecard;
 };
 
 export type WordStat = {

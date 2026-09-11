@@ -1,0 +1,32 @@
+name: trencher
+region: nyc
+services:
+  - name: web
+    github:
+      repo: whoyoujoshin/trencher
+      branch: main
+      deploy_on_push: true
+    dockerfile_path: Dockerfile
+    http_port: 8080
+    instance_count: 1
+    instance_size_slug: apps-s-1vcpu-1gb
+    health_check:
+      http_path: /
+    envs:
+      - key: NODE_ENV
+        value: "production"
+      - key: HOST
+        value: "0.0.0.0"
+      - key: PORT
+        value: "8080"
+      - key: VITE_AUTH_ENABLED
+        scope: BUILD_TIME
+        value: "false"
+      - key: DATABASE_URL
+        scope: RUN_TIME
+        value: ${trencher-db.DATABASE_URL}
+databases:
+  - name: trencher-db
+    engine: PG
+    version: "16"
+    production: false

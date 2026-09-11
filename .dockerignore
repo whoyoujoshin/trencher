@@ -1,6 +1,7 @@
 node_modules
 .vercel
 .nitro
+.output
 .git
 screenshots
 artifacts

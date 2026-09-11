@@ -1,1 +1,2 @@
-PLACEHOLDER_WILL_FAIL
+import { Component } from "react";
+export function TrenchApp() { return null; }

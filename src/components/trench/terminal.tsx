@@ -42,6 +42,7 @@ import {
   ensureHot,
   hotAutoArmed,
   importEthHot,
+  importHot,
   isLiveMint,
   mintEthHot,
   refreshEthHot,
@@ -387,6 +388,7 @@ function WalletDock() {
   const [ethPk, setEthPk] = useState("");
   const [ethBal, setEthBal] = useState<number | null>(null);
   const [ethSecret, setEthSecret] = useState("");
+  const [solSecret, setSolSecret] = useState("");
   const [hotAuto, setHotAutoUi] = useState(false);
 
   const storeHotSol = useTrench((s) => s.hotSol);
@@ -484,6 +486,22 @@ function WalletDock() {
       setEthPk(s.address);
       setEthBal(s.eth);
       useTrench.setState({ hotEthAddr: s.address, hotEth: s.eth });
+    });
+  }
+
+  function takeSolKey() {
+    const r = importHot(solSecret);
+    if (!r.ok || !r.snap) {
+      setMsg(r.error ?? "SOL key did not take.");
+      return;
+    }
+    setSolSecret("");
+    setHotPk(r.snap.pubkey);
+    setMsg(`SOL hot restored ${r.snap.pubkey.slice(0, 8)}… same wallet.`);
+    void refreshHot().then((s) => {
+      setHotPk(s.pubkey);
+      setHotSol(s.sol);
+      useTrench.setState({ hotPubkey: s.pubkey, hotSol: s.sol });
     });
   }
 
@@ -586,6 +604,18 @@ function WalletDock() {
       />
       <Button size="sm" variant="ghost" disabled={!ethSecret.trim()} onClick={takeEthKey}>
         Restore ETH
+      </Button>
+      <input
+        value={solSecret}
+        onChange={(e) => setSolSecret(e.target.value)}
+        placeholder="paste SOL hot secret…"
+        spellCheck={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+        className="h-9 w-[16rem] border border-line bg-elevated px-2 font-mono text-2xs text-fg placeholder:text-subtle"
+      />
+      <Button size="sm" variant="ghost" disabled={!solSecret.trim()} onClick={takeSolKey}>
+        Restore SOL
       </Button>
       {!ethPk ? (
         <Button size="sm" variant="ghost" onClick={mintEth}>

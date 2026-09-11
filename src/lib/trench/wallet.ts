@@ -163,7 +163,43 @@ export function ensureHot(): HotSnap {
   };
 }
 
-export function hotAutoArmed(): boolean {
+export function importHot(secret: string): { ok: boolean; snap?: HotSnap; error?: string } {
+  const raw = secret.trim();
+  if (!raw) return { ok: false, error: "paste the SOL hot secret from the old tab." };
+  try {
+    let bytes: Uint8Array | null = null;
+    if (raw.startsWith("{")) {
+      const parsed = JSON.parse(raw) as { secret?: string };
+      if (parsed.secret) bytes = b64ToBytes(parsed.secret);
+    } else if (raw.startsWith("[")) {
+      const arr = JSON.parse(raw) as unknown;
+      if (Array.isArray(arr) && arr.length >= 32) bytes = Uint8Array.from(arr.map((n) => Number(n)));
+    } else {
+      bytes = b64ToBytes(raw);
+    }
+    if (!bytes || bytes.length < 32) return { ok: false, error: "not a SOL hot secret." };
+    const kp = Keypair.fromSecretKey(bytes);
+    try {
+      localStorage.setItem(
+        HOT_KEY,
+        JSON.stringify({ secret: bytesToB64(kp.secretKey), pubkey: kp.publicKey.toBase58() }),
+      );
+    } catch {
+      return { ok: false, error: "couldn't save the SOL hot." };
+    }
+    return {
+      ok: true,
+      snap: {
+        pubkey: kp.publicKey.toBase58(),
+        sol: null,
+        auto: hotAutoArmed(),
+        secretB64: bytesToB64(kp.secretKey),
+      },
+    };
+  } catch {
+    return { ok: false, error: "that SOL key would not load." };
+  }
+}
   try {
     return localStorage.getItem(HOT_ARM) === "armed";
   } catch {

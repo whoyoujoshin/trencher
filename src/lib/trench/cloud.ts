@@ -106,17 +106,47 @@ export async function seatCloud(pin: string): Promise<string> {
   const p = pin.trim();
   if (p.length < 4) return "chamber # needs 4+ characters.";
   setDeskPin(p);
-  const pulled = await pullDesk({ data: { pin: p, ...ids() } });
+  const ids_ = ids();
+
+  const pulled = await pullDesk({ data: { pin: p, ...ids_ } });
+
+  // Chamber exists and another tab is hunter → watch, do NOT force push
+  if (pulled.ok && !pulled.hunter) {
+    unpack(pulled.blob);
+    hunter = false;
+    noteEyes(pulled.watching);
+    const n = pulled.watching;
+    return n
+      ? `watching. ${n} on this number. hunter tab still trades.`
+      : "watching the chamber. hunter tab still trades.";
+  }
+
+  // Pull failed for reasons other than missing chamber
+  if (!pulled.ok && !/no chamber yet/i.test(pulled.error ?? "")) {
+    return pulled.error;
+  }
+
+  // Missing chamber OR we are/were hunter (lease ours/expired): host
   if (pulled.ok) unpack(pulled.blob);
-  else if (pulled.error && !/no chamber yet/i.test(pulled.error)) return pulled.error;
-  const res = await pushDesk({ data: { pin: p, blob: pack(), force: true, ...ids() } });
+  const res = await pushDesk({
+    data: { pin: p, blob: pack(), force: false, ...ids_ },
+  });
+  // If held by another between pull and push, fall back to watch
+  if (!res.ok && /another tab is the hunter/i.test(res.error ?? "")) {
+    const again = await pullDesk({ data: { pin: p, ...ids_ } });
+    if (again.ok) {
+      unpack(again.blob);
+      hunter = false;
+      noteEyes(again.watching);
+      return "cell held elsewhere — watching instead.";
+    }
+    return res.error;
+  }
   if (!res.ok) return res.error;
   hunter = true;
   noteEyes(res.watching);
   const n = res.watching;
-  return n
-    ? `cell taken. ${n} watching.`
-    : "cell taken. this tab is the hunter.";
+  return n ? `cell taken. ${n} watching.` : "cell taken. this tab is the hunter.";
 }
 
 export async function unlockCloud(pin: string): Promise<string> {

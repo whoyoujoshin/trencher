@@ -200,6 +200,8 @@ export function importHot(secret: string): { ok: boolean; snap?: HotSnap; error?
     return { ok: false, error: "that SOL key would not load." };
   }
 }
+
+export function hotAutoArmed(): boolean {
   try {
     return localStorage.getItem(HOT_ARM) === "armed";
   } catch {

@@ -6,8 +6,13 @@ import {
   type KillGrade,
   type KillRecord,
   type Lesson,
+  type MetaScorecard,
+  type MetaState,
   type Playbook,
+  type SourceTape,
+  type WordStat,
 } from "./types";
+import { pruneKnobMap, pruneWords } from "./logic";
 
 export type SpiritCanon = {
   scoreFloor: number;
@@ -22,6 +27,10 @@ export type SpiritCanon = {
   kills: KillRecord[];
   absorbed: number;
   updatedAt: number;
+  words?: Record<string, WordStat>;
+  card?: MetaScorecard;
+  grokTape?: SourceTape;
+  localTape?: SourceTape;
 };
 
 export function blankCanon(): SpiritCanon {
@@ -66,6 +75,78 @@ function mergeKills(a: KillRecord[], b: KillRecord[]): KillRecord[] {
     .slice(0, 80);
 }
 
+function mergeWordMaps(
+  a?: Record<string, WordStat>,
+  b?: Record<string, WordStat>,
+): Record<string, WordStat> | undefined {
+  if (!a && !b) return undefined;
+  const out: Record<string, WordStat> = { ...(a ?? {}) };
+  for (const [tok, s] of Object.entries(b ?? {})) {
+    const prev = out[tok];
+    out[tok] = prev
+      ? {
+          n: prev.n + s.n,
+          w: prev.w + s.w,
+          pnl: Math.round((prev.pnl + s.pnl) * 100) / 100,
+        }
+      : { ...s };
+  }
+  return pruneWords(out, 48);
+}
+
+function mergeTape(a?: SourceTape, b?: SourceTape): SourceTape | undefined {
+  if (!a && !b) return undefined;
+  return {
+    n: (a?.n ?? 0) + (b?.n ?? 0),
+    pnl: Math.round(((a?.pnl ?? 0) + (b?.pnl ?? 0)) * 100) / 100,
+  };
+}
+
+function mergeKnobMaps(
+  a: Record<string, { n: number; w: number; pnl: number }> | undefined,
+  b: Record<string, { n: number; w: number; pnl: number }> | undefined,
+  cap: number,
+): Record<string, { n: number; w: number; pnl: number }> {
+  const out: Record<string, { n: number; w: number; pnl: number }> = { ...(a ?? {}) };
+  for (const [k, s] of Object.entries(b ?? {})) {
+    const prev = out[k];
+    out[k] = prev
+      ? {
+          n: prev.n + s.n,
+          w: prev.w + s.w,
+          pnl: Math.round((prev.pnl + s.pnl) * 100) / 100,
+        }
+      : { ...s };
+  }
+  return pruneKnobMap(out, cap);
+}
+
+function mergeCards(a?: MetaScorecard, b?: MetaScorecard): MetaScorecard | undefined {
+  if (!a && !b) return undefined;
+  const bySourceKeys = new Set([
+    ...Object.keys(a?.bySource ?? {}),
+    ...Object.keys(b?.bySource ?? {}),
+  ]) as Set<string>;
+  const bySource: MetaScorecard["bySource"] = {};
+  for (const k of bySourceKeys) {
+    const key = k as keyof MetaScorecard["bySource"];
+    const x = a?.bySource?.[key];
+    const y = b?.bySource?.[key];
+    if (!x && !y) continue;
+    bySource[key] = {
+      n: (x?.n ?? 0) + (y?.n ?? 0),
+      w: (x?.w ?? 0) + (y?.w ?? 0),
+      pnl: Math.round(((x?.pnl ?? 0) + (y?.pnl ?? 0)) * 100) / 100,
+    };
+  }
+  return {
+    bySource,
+    byThesis: mergeKnobMaps(a?.byThesis, b?.byThesis, 24),
+    byKeyword: mergeKnobMaps(a?.byKeyword, b?.byKeyword, 24),
+    updatedAt: Math.max(a?.updatedAt ?? 0, b?.updatedAt ?? 0, Date.now()),
+  };
+}
+
 export function mergeCanon(canon: SpiritCanon, book: BookFile | null | undefined): SpiritCanon {
   if (!book || book.kind !== "trencher-book") return canon;
   const play = book.playbook ?? book.house?.playbook;
@@ -85,6 +166,10 @@ export function mergeCanon(canon: SpiritCanon, book: BookFile | null | undefined
     canon.thesis && canon.thesis !== "open book"
       ? canon.thesis
       : incomingThesis || canon.thesis;
+  const words = mergeWordMaps(canon.words, book.meta?.words);
+  const card = mergeCards(canon.card, book.meta?.card);
+  const grokTape = mergeTape(canon.grokTape, book.meta?.grokTape);
+  const localTape = mergeTape(canon.localTape, book.meta?.localTape);
   return {
     scoreFloor: Math.max(canon.scoreFloor, play.scoreFloor ?? 0),
     stopPct: Math.min(canon.stopPct, play.stopPct ?? canon.stopPct),
@@ -101,6 +186,10 @@ export function mergeCanon(canon: SpiritCanon, book: BookFile | null | undefined
     kills: mergeKills(canon.kills, incomingKills),
     absorbed: canon.absorbed + 1,
     updatedAt: Date.now(),
+    ...(words ? { words } : {}),
+    ...(card ? { card } : {}),
+    ...(grokTape ? { grokTape } : {}),
+    ...(localTape ? { localTape } : {}),
   };
 }
 
@@ -115,5 +204,31 @@ export function canonToPlaybook(c: SpiritCanon): Playbook {
 }
 
 export function canonHasBlood(c: SpiritCanon | null | undefined): boolean {
-  return !!c && (c.absorbed > 0 || c.bannedCreators.length > 0);
+  if (!c) return false;
+  if (c.absorbed > 0 || c.bannedCreators.length > 0) return true;
+  if (c.words && Object.values(c.words).some((w) => w.n > 0)) return true;
+  if (c.card?.updatedAt) return true;
+  return false;
+}
+
+export function canonToMetaSeed(c: SpiritCanon): Partial<MetaState> {
+  const blood = canonHasBlood(c);
+  const seed: Partial<MetaState> = {
+    thesis: c.thesis,
+    keywords: [...c.keywords],
+    drop: [...c.drop],
+    source: blood ? "local" : "open",
+  };
+  if (c.words) seed.words = { ...c.words };
+  if (c.card) {
+    seed.card = {
+      bySource: { ...c.card.bySource },
+      byThesis: { ...c.card.byThesis },
+      byKeyword: { ...c.card.byKeyword },
+      updatedAt: c.card.updatedAt,
+    };
+  }
+  if (c.grokTape) seed.grokTape = { ...c.grokTape };
+  if (c.localTape) seed.localTape = { ...c.localTape };
+  return seed;
 }

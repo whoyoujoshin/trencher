@@ -1,8 +1,10 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { absorbKill, absorbTrade, blankPlaybook, blankScorecard, cheapKill, clipsInDay, decideSell, emptyPrint, exitMcap, formatWeather, gmgnLine, gmgnVeto, grokTrust, hotLiveBlock, isHotFill, liveFloor, paperFloor, pickHotLane, ponsWake, regimeShift, scarSit, scoreSetup, setupMatch, sizeByScore, stampDayHits, takeWindow, tapeHeat, trailSpec, windowPrint, wilsonLow, wordEdge, wordShouldDrop, writeWeather } from "./logic.ts";
+import { absorbKill, absorbTrade, blankPlaybook, blankScorecard, cheapKill, clipsInDay, coldKeywords, decideSell, emptyPrint, exitMcap, formatLedger, formatWeather, gmgnLine, gmgnVeto, grokTrust, hotLiveBlock, isHotFill, liveFloor, paperFloor, pickHotLane, ponsWake, regimeShift, scarSit, scarStreak, scoreSetup, setupMatch, shouldAskMeta, sizeByScore, stampDayHits, stripColdKeywords, takeWindow, tapeHeat, trailSpec, windowPrint, wilsonLow, wordEdge, wordShouldDrop, writeWeather } from "./logic.ts";
 import { blankWeather, stampRail } from "./types.ts";
 import type { ClosedTrade, MetaState, PumpCoin } from "./types.ts";
+import { blankCanon, mergeCanon } from "./canon.ts";
+import type { BookFile } from "./types.ts";
 
 function coin(over: Partial<PumpCoin> = {}): PumpCoin {
   return {
@@ -861,5 +863,159 @@ describe("meta scorecard", () => {
       hotTape.n > paperTape.n || Math.abs(hotTape.pnl) > Math.abs(paperTape.pnl),
       `hot n=${hotTape.n} pnl=${hotTape.pnl} vs paper n=${paperTape.n} pnl=${paperTape.pnl}`,
     );
+  });
+});
+
+
+describe("meta outcome brain", () => {
+  function close(over: Partial<ClosedTrade> = {}): ClosedTrade {
+    return {
+      mint: "m",
+      symbol: "X",
+      name: "X",
+      creator: "",
+      costUsd: 8,
+      proceedsUsd: 6,
+      pnlUsd: -2,
+      pnlPct: -0.2,
+      reason: "stop",
+      heldMs: 20_000,
+      openedAt: Date.now() - 20_000,
+      closedAt: Date.now(),
+      score: 50,
+      slipPct: 0,
+      feeUsd: 0.1,
+      ...over,
+    };
+  }
+
+  it("scarStreak true when last 3 closes are losses", () => {
+    const now = Date.now();
+    const closed = [
+      close({ pnlUsd: -1, closedAt: now - 1000 }),
+      close({ pnlUsd: -2, closedAt: now - 2000 }),
+      close({ pnlUsd: -3, closedAt: now - 3000 }),
+      close({ pnlUsd: 5, closedAt: now - 4000 }),
+    ];
+    assert.equal(scarStreak(closed, 3), true);
+  });
+
+  it("scarStreak false when a recent win breaks the streak", () => {
+    const now = Date.now();
+    const closed = [
+      close({ pnlUsd: -1, closedAt: now - 1000 }),
+      close({ pnlUsd: 2, closedAt: now - 2000 }),
+      close({ pnlUsd: -3, closedAt: now - 3000 }),
+    ];
+    assert.equal(scarStreak(closed, 3), false);
+  });
+
+  it("coldKeywords detects scarred keyword on card", () => {
+    const meta: MetaState = {
+      thesis: "open",
+      keywords: ["doge", "pepe"],
+      drop: [],
+      source: "local",
+      updatedAt: Date.now(),
+      card: {
+        bySource: {},
+        byThesis: {},
+        byKeyword: {
+          doge: { n: 4, w: 1, pnl: -9 },
+          pepe: { n: 2, w: 0, pnl: -3 },
+        },
+        updatedAt: Date.now(),
+      },
+    };
+    assert.deepEqual(coldKeywords(meta), ["doge"]);
+  });
+
+  it("stripColdKeywords removes them", () => {
+    const meta: MetaState = {
+      thesis: "open",
+      keywords: ["doge", "pepe"],
+      drop: [],
+      source: "local",
+      updatedAt: Date.now(),
+      card: {
+        bySource: {},
+        byThesis: {},
+        byKeyword: { doge: { n: 5, w: 1, pnl: -12 } },
+        updatedAt: Date.now(),
+      },
+    };
+    const out = stripColdKeywords(meta);
+    assert.deepEqual(out.stripped, ["doge"]);
+    assert.deepEqual(out.meta.keywords, ["pepe"]);
+  });
+
+  it("shouldAskMeta false when local trust healthy", () => {
+    const meta: MetaState = {
+      thesis: "local book",
+      keywords: [],
+      drop: [],
+      source: "grok",
+      updatedAt: Date.now(),
+      grokTape: { n: 6, pnl: -10 },
+      localTape: { n: 6, pnl: 8 },
+    };
+    assert.equal(grokTrust(meta), "local");
+    assert.equal(shouldAskMeta(meta, ["died"]), false);
+  });
+
+  it("mergeCanon merges words n/pnl", () => {
+    const canon = {
+      ...blankCanon(),
+      words: { doge: { n: 2, w: 0, pnl: -4 } },
+    };
+    const book = {
+      v: 1 as const,
+      kind: "trencher-book" as const,
+      savedAt: Date.now(),
+      house: {
+        generation: 1,
+        deaths: 0,
+        escapes: 0,
+        playbook: blankPlaybook(),
+        thesis: "open",
+        keywords: [],
+        drop: [],
+        lessons: [],
+        kills: [],
+      },
+      playbook: blankPlaybook(),
+      meta: {
+        thesis: "open",
+        keywords: [],
+        drop: [],
+        source: "local" as const,
+        updatedAt: Date.now(),
+        words: { doge: { n: 3, w: 1, pnl: -6 } },
+      },
+      lessons: [],
+      kills: [],
+    } satisfies BookFile;
+    const out = mergeCanon(canon, book);
+    assert.equal(out.words!.doge.n, 5);
+    assert.equal(out.words!.doge.pnl, -10);
+    assert.equal(out.words!.doge.w, 1);
+  });
+
+  it("formatLedger non-empty when words present", () => {
+    const meta: MetaState = {
+      thesis: "open",
+      keywords: [],
+      drop: [],
+      source: "local",
+      updatedAt: Date.now(),
+      words: {
+        doge: { n: 4, w: 1, pnl: -8 },
+        pepe: { n: 3, w: 2, pnl: 5 },
+      },
+    };
+    const line = formatLedger(meta);
+    assert.ok(line.length > 0, line);
+    assert.ok(line.includes("doge"), line);
+    assert.ok(line.includes("n="), line);
   });
 });

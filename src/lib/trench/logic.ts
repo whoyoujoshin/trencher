@@ -795,11 +795,16 @@ export function absorbTrade(
         text: `memory: deployer of $${trade.symbol} is burned. next coin from that wallet dies.`,
       });
     }
-    next.scoreFloor = Math.min(72, next.scoreFloor + (trade.score >= 60 ? 2 : 1));
+    if (next.scoreFloor < SCORE_FLOOR) {
+      next.scoreFloor = Math.min(SCORE_FLOOR, next.scoreFloor + (trade.score >= 60 ? 2 : 1));
+    }
     lessons.push({
       at: now,
       agent: "SNIPER",
-      text: `$${trade.symbol} scored ${trade.score} and lost. floor is ${next.scoreFloor}.`,
+      text:
+        next.scoreFloor < SCORE_FLOOR
+          ? `$${trade.symbol} scored ${trade.score} and lost. floor is ${next.scoreFloor}.`
+          : `$${trade.symbol} scored ${trade.score} and lost. META holds the bar.`,
     });
     const peak = trade.peakPct ?? 0;
     if (trade.reason === "stop") {
@@ -950,11 +955,16 @@ export function absorbKill(
     const pct = Math.round((multiple - 1) * 100);
     if (k.kind === "score" || k.kind === "meta") {
       if (judged >= 6 && scored.acc >= 0.7) {
-        next.scoreFloor = Math.min(72, next.scoreFloor + 2);
+        if (next.scoreFloor < SCORE_FLOOR) {
+          next.scoreFloor = Math.min(SCORE_FLOOR, next.scoreFloor + 2);
+        }
         lessons.push({
           at: now,
           agent: "WARDEN",
-          text: `grade $${k.symbol} rugged (${pct}%). warden is holding ${(scored.acc * 100).toFixed(0)}%. floor ${next.scoreFloor}.`,
+          text:
+            next.scoreFloor < SCORE_FLOOR
+              ? `grade $${k.symbol} rugged (${pct}%). warden is holding ${(scored.acc * 100).toFixed(0)}%. floor ${next.scoreFloor}.`
+              : `grade $${k.symbol} rugged (${pct}%). warden is holding ${(scored.acc * 100).toFixed(0)}%. META holds the bar.`,
         });
       } else {
         lessons.push({

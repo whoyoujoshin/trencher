@@ -627,14 +627,14 @@ describe("self-teach", () => {
         creator: `c${i}`,
       }),
     );
-    const book = { ...blankPlaybook(), scoreFloor: 50 };
+    const book = { ...blankPlaybook(), scoreFloor: 40 };
     const out = absorbKill(
       kill({ mint: "now", kind: "score", grade: "rugged", lastMcap: 200, creator: "now" }),
       book,
       meta,
       held,
     );
-    assert.ok(out.playbook.scoreFloor >= 52, `floor ${out.playbook.scoreFloor}`);
+    assert.ok(out.playbook.scoreFloor >= 42, `floor ${out.playbook.scoreFloor}`);
   });
 
   it("cuts the floor harder when warden is missing", () => {

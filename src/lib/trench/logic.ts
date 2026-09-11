@@ -1,5 +1,5 @@
 import { blankWeather, cellHeat, FEE_RATE, FLAT_AFTER_MS, GRADE_AFTER_MS, GREEN_ARM, GREEN_KEEP, HARD_TAKE_PONS, HOT_TRADE_MS, HUNT_MCAP_MAX, HUNT_MCAP_MIN, isEvmMint, MAX_BUY_SOL, PULSE_MS, PULSE_PEAK, SCORE_FLOOR, STOP_LOSS, STOP_LOSS_PONS, TAKE_PROFIT, TRAIL_ARM, TRAIL_ARM_PONS, TRAIL_GIVE, TRAIL_GIVE_PONS, WEATHER_COOLDOWN_MS } from "./types";
-import type { ClosedTrade, KillGrade, KillKind, KillRecord, LaneId, Lesson, MetaState, Playbook, PumpCoin, SellReason, SourceTape, TapeHeat, TapePrint, TapeVenue, Weather, WeatherKind, WordStat } from "./types";
+import type { ClosedTrade, KillGrade, KillKind, KillRecord, LaneId, Lesson, MetaKnobTape, MetaScorecard, MetaState, Playbook, PumpCoin, SellReason, SourceTape, TapeHeat, TapePrint, TapeVenue, Weather, WeatherKind, WordStat } from "./types";
 
 export const CLUSTERS: Record<string, string[]> = {
   stocks: [
@@ -185,8 +185,20 @@ export function scoreSetup(
     bits.push("live");
   }
   if (meta.keywords.length && matchesAny(text, meta.keywords)) {
-    score += 22;
+    let thesisBonus = 22;
+    const matchedKws = meta.keywords.filter((k) => k.length > 1 && text.includes(k));
+    const scarred = matchedKws.some((k) => {
+      const c = meta.card?.byKeyword?.[k];
+      return !!c && c.n >= 3 && c.pnl < 0 && c.w / c.n <= 0.4;
+    });
+    if (scarred) thesisBonus = Math.round(thesisBonus / 2);
+    score += thesisBonus;
     bits.push("thesis");
+  }
+  {
+    const boost = ledgerBoost(coin, meta);
+    score += boost.delta;
+    if (boost.label) bits.push(boost.delta < 0 ? `scar ${boost.label}` : `ledger ${boost.label}`);
   }
   if (now - coin.createdAt < 5 * 60_000) {
     score += 8;
@@ -234,8 +246,20 @@ function scorePons(
   }
   const text = haystack(coin);
   if (meta.keywords.length && matchesAny(text, meta.keywords)) {
-    score += 10;
+    let thesisBonus = 10;
+    const matchedKws = meta.keywords.filter((k) => k.length > 1 && text.includes(k));
+    const scarred = matchedKws.some((k) => {
+      const c = meta.card?.byKeyword?.[k];
+      return !!c && c.n >= 3 && c.pnl < 0 && c.w / c.n <= 0.4;
+    });
+    if (scarred) thesisBonus = Math.round(thesisBonus / 2);
+    score += thesisBonus;
     bits.push("thesis");
+  }
+  {
+    const boost = ledgerBoost(coin, meta);
+    score += boost.delta;
+    if (boost.label) bits.push(boost.delta < 0 ? `scar ${boost.label}` : `ledger ${boost.label}`);
   }
   score = Math.max(1, Math.min(99, Math.round(score)));
   return { score, why: bits.slice(0, 3).join(" · ") || "pons tape" };
@@ -672,6 +696,92 @@ export function tokensFrom(name: string, symbol: string): string[] {
   return Array.from(new Set([...extra, ...words])).slice(0, 6);
 }
 
+
+export function blankScorecard(): MetaScorecard {
+  return { bySource: {}, byThesis: {}, byKeyword: {}, updatedAt: 0 };
+}
+
+export function matchedMetaTokens(coin: PumpCoin, meta: MetaState): string[] {
+  const text = haystack(coin);
+  const fromName = tokensFrom(coin.name, coin.symbol);
+  const fromKw = (meta.keywords ?? []).filter((k) => k.length > 1 && text.includes(k.toLowerCase()));
+  return Array.from(new Set([...fromKw, ...fromName])).slice(0, 6);
+}
+
+export function wordEdge(s: WordStat): number {
+  if (s.n < 2) return 0;
+  const expectancy = s.pnl / s.n;
+  const winRate = s.w / s.n;
+  return clamp(Math.round(expectancy * 1.5 + (winRate - 0.4) * 10), -10, 14);
+}
+
+export function ledgerBoost(coin: PumpCoin, meta: MetaState): { delta: number; label?: string } {
+  const words = meta.words ?? {};
+  const toks = matchedMetaTokens(coin, meta);
+  let delta = 0;
+  let topTok = "";
+  let topAbs = 0;
+  for (const tok of toks) {
+    const s = words[tok];
+    if (!s) continue;
+    const edge = wordEdge(s);
+    delta += edge;
+    if (Math.abs(edge) > topAbs) {
+      topAbs = Math.abs(edge);
+      topTok = tok;
+    }
+  }
+  delta = clamp(delta, -12, 18);
+  if (Math.abs(delta) >= 3 && topTok) return { delta, label: topTok };
+  return { delta };
+}
+
+export function bumpKnob(prev: MetaKnobTape | undefined, win: boolean, pnl: number): MetaKnobTape {
+  const cur = prev ?? { n: 0, w: 0, pnl: 0 };
+  return {
+    n: cur.n + 1,
+    w: cur.w + (win ? 1 : 0),
+    pnl: Math.round((cur.pnl + pnl) * 100) / 100,
+  };
+}
+
+function pruneKnobMap(map: Record<string, MetaKnobTape>, cap = 24): Record<string, MetaKnobTape> {
+  const keys = Object.keys(map);
+  if (keys.length <= cap) return map;
+  const ranked = keys.sort((a, b) => map[a].n - map[b].n || map[a].pnl - map[b].pnl);
+  const drop = new Set(ranked.slice(0, keys.length - cap));
+  const next: Record<string, MetaKnobTape> = {};
+  for (const k of keys) {
+    if (!drop.has(k)) next[k] = map[k];
+  }
+  return next;
+}
+
+export function absorbScorecard(card: MetaScorecard | undefined, trade: ClosedTrade, thesis: string): MetaScorecard {
+  const next: MetaScorecard = card
+    ? {
+        bySource: { ...card.bySource },
+        byThesis: { ...card.byThesis },
+        byKeyword: { ...card.byKeyword },
+        updatedAt: card.updatedAt,
+      }
+    : blankScorecard();
+  const win = trade.pnlUsd > 0;
+  const src = trade.metaSource ?? "open";
+  const key = thesis.trim().slice(0, 40);
+  const hits = (trade.metaHits ?? []).filter(Boolean);
+  const times = isHotFill(trade) ? 2 : 1;
+  for (let i = 0; i < times; i++) {
+    next.bySource[src] = bumpKnob(next.bySource[src], win, trade.pnlUsd);
+    if (key) next.byThesis[key] = bumpKnob(next.byThesis[key], win, trade.pnlUsd);
+    for (const tok of hits) next.byKeyword[tok] = bumpKnob(next.byKeyword[tok], win, trade.pnlUsd);
+  }
+  next.byThesis = pruneKnobMap(next.byThesis, 24);
+  next.byKeyword = pruneKnobMap(next.byKeyword, 24);
+  next.updatedAt = Date.now();
+  return next;
+}
+
 export function wordShouldDrop(s: WordStat): boolean {
   return s.n >= 3 && s.w / s.n <= 0.34 && s.pnl < 0;
 }
@@ -757,9 +867,11 @@ export function absorbTrade(
   const text = `${trade.name} ${trade.symbol}`.toLowerCase();
   const cluster = clusterOf(text);
   const win = trade.pnlUsd > 0;
+  const wordWin = trade.pnlUsd > (trade.feeUsd ?? 0);
   const toks = tokensFrom(trade.name, trade.symbol);
-  for (const tok of toks) words = markWord(words, tok, win, trade.pnlUsd);
+  for (const tok of toks) words = markWord(words, tok, wordWin, trade.pnlUsd);
   words = pruneWords(words);
+  const card = absorbScorecard(meta.card, trade, meta.thesis);
 
   const newlyDropped: string[] = [];
   const lifted: string[] = [];
@@ -897,6 +1009,7 @@ export function absorbTrade(
       drop,
       keywords,
       words,
+      card,
       grokTape,
       localTape,
       source: meta.source === "open" ? "local" : meta.source,

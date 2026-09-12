@@ -1,0 +1,36 @@
+name: apply-solana-rpc-once
+on:
+  workflow_dispatch:
+  push:
+    branches: [fix/solana-rpc-env]
+    paths:
+      - "patches/solana-rpc-prefer-private.diff"
+      - ".github/workflows/apply-solana-rpc-once.yml"
+permissions:
+  contents: write
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/solana-rpc-env
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Apply patch if needed
+        run: |
+          set -euo pipefail
+          if grep -q "function solRpcUrls" src/lib/trench/server.ts; then
+            echo "already applied"
+            exit 0
+          fi
+          patch -p1 < patches/solana-rpc-prefer-private.diff
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add src/lib/trench/server.ts
+          git commit -m "$(cat <<'EOF'
+fix(trench): prefer private Solana RPC for hot sends
+
+Public mainnet/publicnode/ankr often 403 from DO cloud IPs. Prefer SOLANA_RPC_URL or HELIUS_API_KEY, then fall back.
+EOF
+)"
+          git push origin HEAD:fix/solana-rpc-env

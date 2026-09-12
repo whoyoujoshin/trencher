@@ -1,0 +1,117 @@
+--- a/src/lib/trench/server.ts
++++ b/src/lib/trench/server.ts
+@@ -811,35 +811,61 @@
+     }
+   });
+ 
++
++/** Prefer a private Solana RPC (DO env) — public endpoints often 403 cloud IPs. */
++function solRpcUrls(): string[] {
++  const urls: string[] = [];
++  const direct = String(process.env.SOLANA_RPC_URL ?? "").trim();
++  if (direct) urls.push(direct);
++  const helius = String(process.env.HELIUS_API_KEY ?? "").trim();
++  if (helius) urls.push(`https://mainnet.helius-rpc.com/?api-key=${helius}`);
++  for (const u of [
++    "https://api.mainnet-beta.solana.com",
++    "https://solana-rpc.publicnode.com",
++    "https://rpc.ankr.com/solana",
++  ]) {
++    if (!urls.includes(u)) urls.push(u);
++  }
++  return urls;
++}
++
+ export const fetchHotBalance = createServerFn({ method: "POST" })
+   .validator((input: { pubkey: string }) => ({
+     pubkey: String(input.pubkey ?? "").slice(0, 64),
+   }))
+   .handler(async ({ data }) => {
+     if (data.pubkey.length < 32) return { ok: false as const, error: "bad pubkey", sol: null as number | null };
+-    try {
+-      const res = await fetch("https://api.mainnet-beta.solana.com", {
+-        method: "POST",
+-        headers: { "content-type": "application/json" },
+-        body: JSON.stringify({
+-          jsonrpc: "2.0",
+-          id: 1,
+-          method: "getBalance",
+-          params: [data.pubkey],
+-        }),
+-      });
+-      const j = (await res.json()) as { result?: { value?: number }; error?: { message?: string } };
+-      if (j.error?.message) return { ok: false as const, error: j.error.message, sol: null };
+-      const lamports = j.result?.value ?? 0;
+-      const sol = Math.round((lamports / 1_000_000_000) * 10000) / 10000;
+-      return { ok: true as const, sol, error: null as string | null };
+-    } catch (e) {
+-      return {
+-        ok: false as const,
+-        error: e instanceof Error ? e.message : "rpc dark",
+-        sol: null,
+-      };
+-    }
++    let last = "rpc dark";
++    for (const url of solRpcUrls()) {
++      try {
++        const res = await fetch(url, {
++          method: "POST",
++          headers: { "content-type": "application/json" },
++          body: JSON.stringify({
++            jsonrpc: "2.0",
++            id: 1,
++            method: "getBalance",
++            params: [data.pubkey],
++          }),
++          signal: AbortSignal.timeout(10_000),
++        });
++        if (!res.ok) {
++          last = `http ${res.status}`;
++          continue;
++        }
++        const j = (await res.json()) as { result?: { value?: number }; error?: { message?: string } };
++        if (j.error?.message) {
++          last = j.error.message;
++          continue;
++        }
++        const lamports = j.result?.value ?? 0;
++        const sol = Math.round((lamports / 1_000_000_000) * 10000) / 10000;
++        return { ok: true as const, sol, error: null as string | null };
++      } catch (e) {
++        last = e instanceof Error ? e.message : "rpc dark";
++      }
++    }
++    return { ok: false as const, error: last.slice(0, 180), sol: null };
+   });
+ 
+ const BUY_SEL = "0x59a87bc1";
+@@ -1207,11 +1233,6 @@
+     }
+   });
+ 
+-const SEND_RPCS = [
+-  "https://api.mainnet-beta.solana.com",
+-  "https://solana-rpc.publicnode.com",
+-  "https://rpc.ankr.com/solana",
+-];
+ 
+ async function confirmSolSig(url: string, sig: string): Promise<{ ok: boolean; error: string }> {
+   const deadline = Date.now() + 18_000;
+@@ -1255,7 +1276,7 @@
+   .handler(async ({ data }) => {
+     if (data.txB64.length < 32) return { ok: false as const, error: "empty tx", sig: null as string | null };
+     let last = "no rpc";
+-    for (const url of SEND_RPCS) {
++    for (const url of solRpcUrls()) {
+       try {
+         const res = await fetch(url, {
+           method: "POST",
+@@ -1305,7 +1326,7 @@
+         "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
+         "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
+       ];
+-      for (const url of SEND_RPCS) {
++      for (const url of solRpcUrls()) {
+         let hit = false;
+         for (const programId of programs) {
+           try {

@@ -1643,6 +1643,7 @@ export const useTrench = create<TrenchState>()(
             log("META", "sys", "blank playbook. every loser rewrites a rule. I never touch the book.");
             log("WARDEN", "sys", "my no beats every score. wallets that dump us get burned.");
           }
+          log("SNIPER", "sys", "armed. waiting on warden + tape. never averages.");
           log("RISK", "sys", "no entry without a written exit. stops only tighten.");
           log("TILL", "till", `${get().callsign || "body"} · staked ${STARTING_CASH.toFixed(0)} usd. the gate is ${gateUsd(1)}. balance hits zero, this clone is deleted.`);
         },

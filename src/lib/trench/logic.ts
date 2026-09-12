@@ -1,4 +1,4 @@
-import { blankWeather, cellHeat, FEE_RATE, FLAT_AFTER_MS, GRADE_AFTER_MS, GREEN_ARM, GREEN_KEEP, HARD_TAKE_PONS, HOT_TRADE_MS, HUNT_MCAP_MAX, HUNT_MCAP_MIN, isEvmMint, MAX_BUY_SOL, PULSE_MS, PULSE_PEAK, SCORE_FLOOR, STOP_LOSS, STOP_LOSS_PONS, TAKE_PROFIT, TRAIL_ARM, TRAIL_ARM_PONS, TRAIL_GIVE, TRAIL_GIVE_PONS, WEATHER_COOLDOWN_MS } from "./types";
+import { blankWeather, cellHeat, FEE_RATE, FLAT_AFTER_MS, GRADE_AFTER_MS, GREEN_ARM, GREEN_KEEP, HARD_TAKE_PONS, HOT_PUNCH, HOT_TRADE_MS, HUNT_MCAP_MAX, HUNT_MCAP_MIN, isEvmMint, MAX_BUY_SOL, PULSE_MS, PULSE_PEAK, SCORE_FLOOR, STOP_LOSS, STOP_LOSS_PONS, TAKE_PROFIT, TRAIL_ARM, TRAIL_ARM_PONS, TRAIL_GIVE, TRAIL_GIVE_PONS, WEATHER_COOLDOWN_MS } from "./types";
 import type { ClosedTrade, KillGrade, KillKind, KillRecord, LaneId, Lesson, MetaKnobTape, MetaScorecard, MetaState, Playbook, PumpCoin, SellReason, SourceTape, TapeHeat, TapePrint, TapeVenue, Weather, WeatherKind, WordStat } from "./types";
 
 export const CLUSTERS: Record<string, string[]> = {
@@ -141,6 +141,7 @@ export function setupMatch(coin: PumpCoin, meta: MetaState, now: number): string
 export function hotLiveBlock(
   coin: Pick<PumpCoin, "mint" | "symbol" | "usdMcap" | "lastTradeAt" | "venue">,
   now: number,
+  score = 0,
 ): string | null {
   const pons = coin.venue === "pons" || isEvmMint(coin.mint);
   if (pons) {
@@ -156,9 +157,20 @@ export function hotLiveBlock(
     return `live skip $${coin.symbol} — mcap ${Math.round(coin.usdMcap)} outside the window. paper only.`;
   }
   if (coin.lastTradeAt == null || now - coin.lastTradeAt > HOT_TRADE_MS) {
+    if (score >= HOT_PUNCH) return null;
     return `live skip $${coin.symbol} — curve quiet. paper only.`;
   }
   return null;
+}
+
+export function punchedQuiet(
+  coin: Pick<PumpCoin, "mint" | "lastTradeAt" | "venue">,
+  now: number,
+  score: number,
+): boolean {
+  if (score < HOT_PUNCH) return false;
+  if (coin.venue === "pons" || isEvmMint(coin.mint)) return false;
+  return coin.lastTradeAt == null || now - coin.lastTradeAt > HOT_TRADE_MS;
 }
 
 export function scoreSetup(

@@ -317,6 +317,7 @@ export const GREEN_KEEP = 0.02;
 export const PULSE_MS = 8_000;
 export const PULSE_PEAK = 0.06;
 export const HOT_TRADE_MS = 60_000;
+export const HOT_PUNCH = 80;
 export const HUNT_MCAP_MIN = 25_000;
 export const HUNT_MCAP_MAX = 400_000;
 export const HOT_MCAP_PONS = HUNT_MCAP_MIN;

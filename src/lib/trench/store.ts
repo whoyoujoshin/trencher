@@ -64,6 +64,7 @@ import {
   grokTrust,
   onParole,
   hotLiveBlock,
+  punchedQuiet,
   stampDayHits,
   matchedMetaTokens,
 } from "./logic";
@@ -601,12 +602,20 @@ export const useTrench = create<TrenchState>()(
       function fireLive(lane: LaneId, coin: PumpCoin, score: number) {
         const mint = coin.mint;
         const symbol = coin.symbol;
-        const quiet = hotLiveBlock(coin, Date.now());
+        const quiet = hotLiveBlock(coin, Date.now(), score);
         if (quiet) {
           if (!hush(`live:quiet:${mint}`, 45_000)) {
             log("TILL", "sys", quiet, { mint, symbol });
           }
           return;
+        }
+        if (punchedQuiet(coin, Date.now(), score)) {
+          log(
+            "TILL",
+            "till",
+            `home run $${symbol} score ${score}. punching the quiet curve.`,
+            { mint, symbol },
+          );
         }
         const chain: "sol" | "robinhood" =
           isEvmMint(mint) || get().tapeVenue === "pons" ? "robinhood" : "sol";

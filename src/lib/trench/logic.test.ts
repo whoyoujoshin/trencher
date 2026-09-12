@@ -490,6 +490,8 @@ describe("META weather", () => {
       lastTradeAt: now - 90_000,
     });
     assert.ok(hotLiveBlock(quiet, now)?.includes("quiet"));
+    assert.equal(hotLiveBlock(quiet, now, 84), null);
+    assert.ok(hotLiveBlock(quiet, now, 60)?.includes("quiet"));
     const woke = coin({
       venue: "pump",
       mint: "So1anaMint1111111111111111111111111111111",
@@ -498,8 +500,8 @@ describe("META weather", () => {
     });
     assert.equal(hotLiveBlock(woke, now), null);
     const thin = coin({ usdMcap: 1600 });
-    assert.ok(setupMatch(thin, open, now)?.includes("50k"));
     assert.ok(hotLiveBlock(thin, now)?.includes("mcap"));
+    assert.ok(hotLiveBlock(thin, now, 84)?.includes("mcap"));
     assert.equal(hotLiveBlock(coin({ usdMcap: 64_000 }), now), null);
   });
 

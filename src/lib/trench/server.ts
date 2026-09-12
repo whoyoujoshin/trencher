@@ -37,3 +37,16 @@ const creatorCache = new Map<
 const CREATOR_TTL = 3 * 60_000;
 
 type RawCoin = Record<string, unknown>;
+
+function num(v: unknown): number {
+  if (typeof v === "number" && Number.isFinite(v)) return v;
+  if (typeof v === "string") {
+    const n = Number(v);
+    return Number.isFinite(n) ? n : 0;
+  }
+  return 0;
+}
+
+function str(v: unknown): string {
+  return typeof v === "string" ? v : "";
+}

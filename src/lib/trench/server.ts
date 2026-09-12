@@ -1408,15 +1408,40 @@ function parseGmgnSnap(raw: unknown): {
   };
 }
 
+function asciiGmgnKey(raw: string): { key: string; error: string | null } {
+  const s = String(raw ?? "")
+    .replace(/[^\x20-\x7E]/g, "")
+    .replace(/\s+/g, "")
+    .trim();
+  if (!s) return { key: "", error: "no key" };
+  if (/BEGIN/i.test(s) || s.includes("-----")) {
+    return { key: "", error: "pem in the key box. paste the API key." };
+  }
+  for (let i = 0; i < s.length; i++) {
+    if (s.charCodeAt(i) > 127) return { key: "", error: "key has junk chars. paste the API key." };
+  }
+  return { key: s, error: null };
+}
+
+function gmgnHeaderError(e: unknown): string {
+  const msg = e instanceof Error ? e.message : "gmgn dark";
+  if (/ByteString|character at index|Invalid character in header/i.test(msg)) {
+    return "key has junk chars. paste the API key, not the PEM.";
+  }
+  return msg.slice(0, 80);
+}
+
 export const probeGmgn = createServerFn({ method: "POST" })
   .validator((input: { mint: string; key?: string; chain?: string }) => ({
     mint: String(input.mint ?? "").slice(0, 80),
-    key: String(input.key ?? "").slice(0, 220),
+    key: String(input.key ?? "").slice(0, 400),
     chain: input.chain === "robinhood" ? "robinhood" : "sol",
   }))
   .handler(async ({ data }) => {
-    const key = data.key || String(process.env.GMGN_API_KEY ?? "").trim();
-    if (!key) return { ok: false as const, error: "no key", snap: null };
+    const rawKey = data.key || String(process.env.GMGN_API_KEY ?? "").trim();
+    const cleaned = asciiGmgnKey(rawKey);
+    if (cleaned.error || !cleaned.key) return { ok: false as const, error: cleaned.error || "no key", snap: null };
+    const key = cleaned.key;
     if (data.mint.length < 32) return { ok: false as const, error: "bad mint", snap: null };
     const hit = gmgnCache.get(data.mint);
     if (hit && Date.now() - hit.at < GMGN_TTL) {
@@ -1453,7 +1478,7 @@ export const probeGmgn = createServerFn({ method: "POST" })
     } catch (e) {
       return {
         ok: false as const,
-        error: e instanceof Error ? e.message.slice(0, 80) : "gmgn dark",
+        error: gmgnHeaderError(e),
         snap: null,
       };
     }
@@ -1514,12 +1539,16 @@ function coinFromGmgn(row: RawCoin, chain: "sol" | "robinhood"): PumpCoin | null
 
 export const fetchGmgnTape = createServerFn({ method: "POST" })
   .validator((input: { key?: string; chain?: string }) => ({
-    key: String(input.key ?? "").slice(0, 220),
+    key: String(input.key ?? "").slice(0, 400),
     chain: input.chain === "robinhood" ? "robinhood" : "sol",
   }))
   .handler(async ({ data }) => {
-    const key = data.key || String(process.env.GMGN_API_KEY ?? "").trim();
-    if (!key) return { ok: false as const, error: "no key", coins: [] as PumpCoin[] };
+    const rawKey = data.key || String(process.env.GMGN_API_KEY ?? "").trim();
+    const cleaned = asciiGmgnKey(rawKey);
+    if (cleaned.error || !cleaned.key) {
+      return { ok: false as const, error: cleaned.error || "no key", coins: [] as PumpCoin[] };
+    }
+    const key = cleaned.key;
     if (gmgnTapeCache && gmgnTapeCache.chain === data.chain && Date.now() - gmgnTapeCache.at < GMGN_TAPE_TTL) {
       return { ok: true as const, error: null as string | null, coins: gmgnTapeCache.coins };
     }
@@ -1596,7 +1625,7 @@ export const fetchGmgnTape = createServerFn({ method: "POST" })
     } catch (e) {
       return {
         ok: false as const,
-        error: e instanceof Error ? e.message.slice(0, 80) : "gmgn dark",
+        error: gmgnHeaderError(e),
         coins: [] as PumpCoin[],
       };
     }

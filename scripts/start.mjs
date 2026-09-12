@@ -30,4 +30,13 @@ const migrate = spawnSync(process.execPath, [join(root, "scripts", "migrate.mjs"
 });
 if (migrate.status) process.exit(migrate.status);
 
+const inject = spawnSync(process.execPath, [join(root, "scripts", "inject-sol-rpc.mjs")], {
+  cwd: root,
+  env: process.env,
+  stdio: "inherit",
+});
+if (inject.status) {
+  console.warn("[start] sol-rpc inject exited", inject.status, "— continuing");
+}
+
 await import(pathToFileURL(server).href);

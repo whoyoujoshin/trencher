@@ -17,7 +17,19 @@ jobs:
           ref: feat/profit-loop-p0
           token: ${{ secrets.GITHUB_TOKEN }}
       - name: Assemble land script
-        run: cat scripts/land-part-0.txt scripts/land-part-1.txt scripts/land-part-2.txt scripts/land-part-3.txt > scripts/land-profit-loop-p0.mjs
+        run: |
+          cat scripts/land-part-0.txt scripts/land-part-1.txt scripts/land-part-2.txt scripts/land-part-3.txt > scripts/land-profit-loop-p0.mjs
+          python3 - <<'PY'
+          from pathlib import Path
+          p = bytearray(Path("scripts/land-profit-loop-p0.mjs").read_bytes())
+          # MCP upload corrupted 2 base64 bytes; restore known-good offsets
+          assert len(p) == 25989, len(p)
+          if p[5001] == ord("p"): p[5001] = ord("d")
+          if p[21022] == ord("+"): p[21022] = ord("8")
+          assert p[5001] == ord("d") and p[21022] == ord("8"), (p[5001], p[21022])
+          Path("scripts/land-profit-loop-p0.mjs").write_bytes(p)
+          print("byte-patched land script OK")
+          PY
       - name: Expand logic + patch store
         run: node scripts/land-profit-loop-p0.mjs
       - name: Commit landed sources

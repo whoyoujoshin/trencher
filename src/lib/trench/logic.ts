@@ -1,4 +1,5 @@
-import { blankWeather, cellHeat, FEE_RATE, FLAT_AFTER_MS, GRADE_AFTER_MS, GREEN_ARM, GREEN_KEEP, HARD_TAKE_PONS, HOT_PUNCH, HOT_TRADE_MS, HUNT_MCAP_MAX, HUNT_MCAP_MIN, isEvmMint, MAX_BUY_SOL, PULSE_MS, PULSE_PEAK, SCORE_FLOOR, STOP_LOSS, STOP_LOSS_PONS, TAKE_PROFIT, TRAIL_ARM, TRAIL_ARM_PONS, TRAIL_GIVE, TRAIL_GIVE_PONS, WEATHER_COOLDOWN_MS } from "./types";
+
+import { blankWeather, cellHeat, FEE_RATE, FLAT_AFTER_MS, GRADE_AFTER_MS, GREEN_ARM, GREEN_KEEP, HARD_TAKE_PONS, HOT_PUNCH, HOT_TRADE_MS, HUNT_MCAP_MAX, HUNT_MCAP_MIN, isEvmMint, MAX_BUY_SOL, MIN_BANK_PCT, MIN_BANK_SCAR_PCT, PULSE_MS, PULSE_PEAK, RIPPER_FLOOR_CUT, RIPPER_PUNCH, SCORE_FLOOR, STOP_LOSS, STOP_LOSS_PONS, TAKE_PROFIT, TRAIL_ARM, TRAIL_ARM_PONS, TRAIL_GIVE, TRAIL_GIVE_PONS, WEATHER_COOLDOWN_MS } from "./types";
 import type { ClosedTrade, KillGrade, KillKind, KillRecord, LaneId, Lesson, MetaKnobTape, MetaScorecard, MetaState, Playbook, PumpCoin, SellReason, SourceTape, TapeHeat, TapePrint, TapeVenue, Weather, WeatherKind, WordStat } from "./types";
 
 export const CLUSTERS: Record<string, string[]> = {
@@ -155,6 +156,7 @@ export function hotLiveBlock(
   coin: Pick<PumpCoin, "mint" | "symbol" | "usdMcap" | "lastTradeAt" | "createdAt" | "venue">,
   now: number,
   score = 0,
+  heatScore = 0,
 ): string | null {
   const pons = coin.venue === "pons" || isEvmMint(coin.mint);
   if (pons) {
@@ -175,6 +177,8 @@ export function hotLiveBlock(
   if (quiet) {
     if (score >= HOT_PUNCH) return null;
     if (born && now - born <= HOT_TRADE_MS) return null;
+    // Ripper: high tape heat + enough score punches quiet without needing HOT_PUNCH.
+    if (heatScore >= 70 && score >= RIPPER_PUNCH) return null;
     return `live skip $${coin.symbol} — curve quiet. paper only.`;
   }
   return null;
@@ -184,8 +188,10 @@ export function punchedQuiet(
   coin: Pick<PumpCoin, "mint" | "lastTradeAt" | "venue">,
   now: number,
   score: number,
+  heatScore = 0,
 ): boolean {
-  if (score < HOT_PUNCH) return false;
+  const punch = score >= HOT_PUNCH || (heatScore >= 70 && score >= RIPPER_PUNCH);
+  if (!punch) return false;
   if (coin.venue === "pons" || isEvmMint(coin.mint)) return false;
   return coin.lastTradeAt == null || now - coin.lastTradeAt > HOT_TRADE_MS;
 }
@@ -646,6 +652,33 @@ export function liveFloor(book: Playbook, weather: Weather, spirit: number): num
   return paperFloor(book, weather, spirit);
 }
 
+/** Lower the effective score barrier for momentum clips in the mcap window. */
+export function ripperFloor(
+  base: number,
+  coin: Pick<PumpCoin, "usdMcap" | "createdAt" | "lastTradeAt" | "venue" | "mint">,
+  now: number,
+  heat?: TapeHeat | null,
+): number {
+  const inWindow = coin.usdMcap >= HUNT_MCAP_MIN && coin.usdMcap <= HUNT_MCAP_MAX;
+  if (!inWindow) return base;
+  let cut = 0;
+  const born = coin.createdAt && coin.createdAt < 1e12 ? coin.createdAt * 1000 : coin.createdAt;
+  if (born && now - born < 5 * 60_000) cut += 5;
+  if (heat?.ok && heat.score >= 65) cut += 5;
+  const last = coin.lastTradeAt && coin.lastTradeAt < 1e12 ? coin.lastTradeAt * 1000 : coin.lastTradeAt;
+  if (last != null && now - last < HOT_TRADE_MS) cut += 3;
+  cut = Math.min(RIPPER_FLOOR_CUT, cut);
+  return Math.max(40, base - cut);
+}
+
+/** Fee+slip edge for bank-any-green. Scar streaks bank earlier. */
+export function bankPct(scarred = false, weather?: Weather): number {
+  const base = scarred ? MIN_BANK_SCAR_PCT : MIN_BANK_PCT;
+  const wx = weather?.greenArm;
+  if (wx != null && wx > 0 && wx < base) return Math.max(0.02, wx);
+  return base;
+}
+
 export function minClip(venue?: TapeVenue): number {
   return venue === "pons" ? 2 : 4;
 }
@@ -1011,8 +1044,9 @@ export function absorbTrade(
   let words = { ...(meta.words ?? {}) };
   const text = `${trade.name} ${trade.symbol}`.toLowerCase();
   const cluster = clusterOf(text);
+  // pnlUsd is already net of buy+sell fees — any green counts as a win for learning.
   const win = trade.pnlUsd > 0;
-  const wordWin = trade.pnlUsd > (trade.feeUsd ?? 0);
+  const wordWin = win;
   const toks = tokensFrom(trade.name, trade.symbol);
   for (const tok of toks) words = markWord(words, tok, wordWin, trade.pnlUsd);
   words = pruneWords(words);
@@ -1063,6 +1097,17 @@ export function absorbTrade(
     }
     if (next.scoreFloor < SCORE_FLOOR) {
       next.scoreFloor = Math.min(SCORE_FLOOR, next.scoreFloor + (trade.score >= 60 ? 2 : 1));
+    }
+    if (scarStreak([trade, ...recent], 3)) {
+      const raised = Math.min(SCORE_FLOOR + 8, next.scoreFloor + 2);
+      if (raised > next.scoreFloor) {
+        next.scoreFloor = raised;
+        lessons.push({
+          at: now,
+          agent: "RISK",
+          text: `scar streak. floor raised to ${next.scoreFloor}. bank earlier next clips.`,
+        });
+      }
     }
     lessons.push({
       at: now,
@@ -1474,12 +1519,16 @@ export function exitMcap(
     const trailAt = peak * (1 - give);
     if (last < trailAt) return trailAt;
   }
+  const scarred = (weather?.print?.scarStreak ?? 0) >= 3 || (weather?.kind ?? []).includes("bleed");
   const green = protectSpec(weather);
-  if (peakPct >= green.arm) {
-    const keepAt = entry * (1 + green.keep);
+  const gArm = scarred ? Math.min(green.arm, bankPct(true, weather)) : green.arm;
+  const gKeep = scarred ? Math.max(green.keep, bankPct(true, weather) * 0.5) : green.keep;
+  if (peakPct >= gArm) {
+    const keepAt = entry * (1 + gKeep);
     if (last < keepAt) return keepAt;
   }
-  const stop = p.stopPct ?? (venue === "pons" ? STOP_LOSS_PONS : STOP_LOSS);
+  let stop = p.stopPct ?? (venue === "pons" ? STOP_LOSS_PONS : STOP_LOSS);
+  if (scarred) stop = Math.min(-0.12, stop + 0.05);
   const stopAt = entry * (1 + stop);
   if (last < stopAt) return stopAt;
   return last;
@@ -1508,17 +1557,26 @@ export function decideSell(
   weather?: Weather,
 ): SellReason | null {
   const pct = pnlPct(p.costUsd, p.entryMcap, p.lastMcap);
-  const stop = p.stopPct ?? book.stopPct;
+  const scarred = (weather?.print?.scarStreak ?? 0) >= 3 || (weather?.kind ?? []).includes("bleed");
+  let stop = p.stopPct ?? book.stopPct;
+  if (scarred) stop = Math.min(-0.12, stop + 0.05);
   const spec = trailSpec(venue, weather);
+  const give = scarred ? Math.min(spec.give, 0.08) : spec.give;
+  const arm = scarred ? Math.min(spec.arm, Math.max(0.15, bankPct(true, weather) + 0.08)) : spec.arm;
   const peakPct = p.entryMcap > 0 ? p.peakMcap / p.entryMcap - 1 : 0;
   const fromPeak = p.peakMcap > 0 ? p.lastMcap / p.peakMcap - 1 : 0;
   if (spec.hard != null && pct >= spec.hard) return "take";
   const take = p.takePct ?? book.takePct;
   if (take > 0 && pct >= take) return "take";
-  if (peakPct >= spec.arm && fromPeak <= -spec.give) return "take";
-  if (peakPct >= spec.arm && pct <= stop) return "take";
+  // Bank any green past fees+slip — do not wait for big runners.
+  const bank = bankPct(scarred, weather);
+  if (pct >= bank) return "take";
+  if (peakPct >= arm && fromPeak <= -give) return "take";
+  if (peakPct >= arm && pct <= stop) return "take";
   const green = protectSpec(weather);
-  if (peakPct >= green.arm && pct <= green.keep) return "take";
+  const greenArm = scarred ? Math.min(green.arm, bank) : green.arm;
+  const greenKeep = scarred ? Math.max(green.keep, bank * 0.5) : green.keep;
+  if (peakPct >= greenArm && pct <= greenKeep) return "take";
   if (pct <= stop) return "stop";
   const held = now - p.openedAt;
   if (held >= PULSE_MS && peakPct < PULSE_PEAK && pct <= 0) return "time";

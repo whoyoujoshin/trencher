@@ -69,11 +69,13 @@ import {
   stampDayHits,
   matchedMetaTokens,
   ponsCurveLive,
+  ripperFloor,
 } from "./logic";
 import { ntfyHeartbeat, pingNtfy } from "./ntfy";
 import { gmgnKey } from "./gmgn";
 import { amHunter, deskPin, syncCloud } from "./cloud";
-import { LIVE_CAP_ETH, LIVE_CAP_SOL, LIVE_ETH_USD, LIVE_ETH_FUND, ethHotBuy, ethHotSell, flattenHot as flattenHotBags, hotAutoArmed, hotBuy, hotSell, isLiveMint, peekEthHot, refreshEthHot, refreshHot, signOneBuy, signOneState } from "./wallet";
+import { LIVE_CAP_ETH, LIVE_CAP_SOL, LIVE_ETH_USD, LIVE_ETH_FUND, ethHotBuy, ethHotSell, flattenHot as flattenHotBags, hotAutoArmed, hotBuy, hotSell, isLiveMint, peekEthHot, refreshEthHot, refreshHot, shadowQuote, signOneBuy, signOneState } from "./wallet";
+import { buildShadowFill, shadowLearnOn, shadowTillLine } from "./shadow";
 import { canonHasBlood, canonToMetaSeed, canonToPlaybook } from "./canon";
 import { useSpirit } from "./spirit";
 import {
@@ -698,6 +700,154 @@ export const useTrench = create<TrenchState>()(
         );
       }
 
+
+      function bookShadowPos(lane: LaneId, coin: PumpCoin, score: number, intendedUsd: number) {
+        const now = Date.now();
+        const venue = venueOfMint(coin.mint);
+        const hatchBook = get().rival?.playbook;
+        const cubBook = get().extra?.playbook;
+        const book =
+          lane === "hatch" && hatchBook ? hatchBook : lane === "cub" && cubBook ? cubBook : get().playbook;
+        const fill = buildShadowFill({
+          coin,
+          score,
+          intendedUsd,
+          book,
+          stopPct: clipStop(book, venue),
+          takePct: book.takePct,
+          meta: get().meta,
+          metaHits: matchedMetaTokens(coin, get().meta),
+          solUsd: get().solUsd || 140,
+          now,
+        });
+        const who = signOf(lane);
+        const line = shadowTillLine({
+          laneTag: who,
+          coin,
+          fillUsd: fill.fillUsd,
+          score,
+          venue,
+          shadowSol: fill.shadowSol,
+          shadowUsd: fill.shadowUsd,
+          why: "SHADOW_LEARN",
+        });
+        log("TILL", "sys", line, { mint: coin.mint, symbol: coin.symbol });
+        log(
+          "RISK",
+          "sys",
+          `${who} · SHADOW exit $${coin.symbol}: stop ${(clipStop(book, venue) * 100).toFixed(0)}% / bank-green on.`,
+          { mint: coin.mint, symbol: coin.symbol },
+        );
+        if (lane === "hatch") {
+          set((s) =>
+            s.rival
+              ? {
+                  rival: {
+                    ...s.rival,
+                    cash: s.rival.cash - fill.debit,
+                    feesPaid: (s.rival.feesPaid ?? 0) + fill.feeUsd,
+                    positions: [fill.pos, ...s.rival.positions],
+                    lastBuyAt: now,
+                  },
+                }
+              : {},
+          );
+        } else if (lane === "cub") {
+          set((s) =>
+            s.extra
+              ? {
+                  extra: {
+                    ...s.extra,
+                    cash: s.extra.cash - fill.debit,
+                    feesPaid: (s.extra.feesPaid ?? 0) + fill.feeUsd,
+                    positions: [fill.pos, ...s.extra.positions],
+                    lastBuyAt: now,
+                  },
+                }
+              : {},
+          );
+        } else {
+          set((s) => ({
+            cash: s.cash - fill.debit,
+            feesPaid: (s.feesPaid ?? 0) + fill.feeUsd,
+            positions: [fill.pos, ...s.positions],
+            lastBuyAt: now,
+          }));
+        }
+        log(
+          "SNIPER",
+          "buy",
+          `${who} · SHADOW fill $${coin.symbol} ${fill.fillUsd.toFixed(2)} usd · score ${score}. learning only.`,
+          { mint: coin.mint, symbol: coin.symbol },
+        );
+        set({ lastHotLine: `SHADOW · $${coin.symbol}`.slice(0, 80) });
+      }
+
+      /** HOT when armed; SHADOW paper when learning so META keeps blood without spending SOL. */
+      async function tryClip(lane: LaneId, coin: PumpCoin, score: number): Promise<"hot" | "shadow" | "skip"> {
+        const st = get();
+        const hatchBook = st.rival?.playbook;
+        const cubBook = st.extra?.playbook;
+        const book =
+          lane === "hatch" && hatchBook ? hatchBook : lane === "cub" && cubBook ? cubBook : st.playbook;
+        const cash =
+          lane === "hatch"
+            ? st.rival?.cash ?? 0
+            : lane === "cub"
+              ? st.extra?.cash ?? 0
+              : st.cash;
+        const venue = venueOfMint(coin.mint);
+        const intended = sizeByScore(cash, st.solUsd, score, venue, wxNow());
+        const armed = hotAutoArmed() || signOneState() === "armed";
+        if (armed) {
+          const landed = await fireLive(lane, coin, score);
+          if (landed) return "hot";
+          if (shadowLearnOn() && intended >= minClip(venue)) {
+            const debitProbe = intended * 1.05 + paperFee(intended);
+            if (cash >= debitProbe) {
+              bookShadowPos(lane, coin, score, intended);
+              return "shadow";
+            }
+          }
+          return "skip";
+        }
+        if (!shadowLearnOn()) {
+          if (!hush("shadow:off", 180_000)) {
+            log("TILL", "sys", "LIVE skip · hot is not armed. SHADOW_LEARN off. no clip.", {
+              mint: coin.mint,
+              symbol: coin.symbol,
+            });
+          }
+          return "skip";
+        }
+        if (intended < minClip(venue)) {
+          if (!hush(`cash:${lane}`, 90_000)) {
+            log("SNIPER", "sys", `${signOf(lane)} · size under ${minClip(venue)} usd. waiting on cash.`);
+          }
+          return "skip";
+        }
+        const slipPct = paperSlip(coin.usdMcap);
+        const fillUsd = Math.round(intended * (1 + slipPct) * 100) / 100;
+        const feeUsd = paperFee(fillUsd);
+        if (cash < fillUsd + feeUsd) {
+          log("TILL", "till", `$${coin.symbol} fill plus fee is ${(fillUsd + feeUsd).toFixed(2)}. not enough cash.`);
+          return "skip";
+        }
+        // Basic window gate for shadow — same as live mcap window
+        const quiet = hotLiveBlock(coin, Date.now(), score, (venue === "pons" ? get().heatPons : get().heatPump)?.score ?? 0);
+        if (quiet && quiet.includes("mcap")) {
+          if (!hush(`shadow:mcap:${coin.mint}`, 45_000)) {
+            log("TILL", "sys", quiet.replace("paper only.", "SHADOW skipped."), {
+              mint: coin.mint,
+              symbol: coin.symbol,
+            });
+          }
+          return "skip";
+        }
+        bookShadowPos(lane, coin, score, intended);
+        return "shadow";
+      }
+
       async function fireLive(lane: LaneId, coin: PumpCoin, score: number): Promise<boolean> {
         const mint = coin.mint;
         const symbol = coin.symbol;
@@ -711,12 +861,13 @@ export const useTrench = create<TrenchState>()(
           skip(`$${symbol} no live ETH router. skipped.`);
           return false;
         }
-        const quiet = hotLiveBlock(coin, Date.now(), score);
+        const heatScore = (isEvmMint(mint) ? get().heatPons : get().heatPump)?.score ?? 0;
+        const quiet = hotLiveBlock(coin, Date.now(), score, heatScore);
         if (quiet) {
           skip(quiet.replace(/^live skip \$[^ ]+ — /, ""), `live:quiet:${mint}`);
           return false;
         }
-        if (punchedQuiet(coin, Date.now(), score)) {
+        if (punchedQuiet(coin, Date.now(), score, heatScore)) {
           log(
             "TILL",
             "till",
@@ -729,7 +880,8 @@ export const useTrench = create<TrenchState>()(
         const cubBook = get().extra?.playbook;
         const book =
           lane === "hatch" && hatchBook ? hatchBook : lane === "cub" && cubBook ? cubBook : get().playbook;
-        const floor = liveFloor(book, wxNow(), spiritNow());
+        const baseFloor = liveFloor(book, wxNow(), spiritNow());
+        const floor = ripperFloor(baseFloor, coin, Date.now(), heatScore ? { venue: isEvmMint(mint) ? "pons" : "pump", at: Date.now(), ok: true, launches: 0, named: 0, live: 0, runners: 0, flowUsd: 0, newestAgeMs: 0, score: heatScore } : null);
         const spend = async (): Promise<boolean> => {
           if (!hotAutoArmed() && signOneState() !== "armed") {
             skip(`hot is not armed. $${symbol} scored ${score}. no fill.`, "live:off", 30_000);
@@ -914,10 +1066,10 @@ export const useTrench = create<TrenchState>()(
           const miss = setupMatch(coin, st.meta, now);
           if (miss) continue;
           const scored = scoreSetup(coin, st.meta, now, st.playbook);
-          const floor = liveFloor(st.playbook, wxNow(), spiritNow());
+          const floor = ripperFloor(liveFloor(st.playbook, wxNow(), spiritNow()), coin, now, st.heatPons);
           if (scored.score < floor) continue;
-          const landed = await fireLive("vet", coin, scored.score);
-          if (landed) lastEthBuyAt = now;
+          const landed = await tryClip("vet", coin, scored.score);
+          if (landed === "hot") lastEthBuyAt = now;
           break;
         }
       }
@@ -979,7 +1131,7 @@ export const useTrench = create<TrenchState>()(
             : lane === "cub"
               ? st.extra?.playbook ?? st.playbook
               : st.playbook;
-        const venue = st.tapeVenue;
+        const venue = venueOfMint(p.mint);
         const wx = st.weather ?? blankWeather();
         const mark = exitMcap(p, venue, wx);
         const pct = pnlPct(p.costUsd, p.entryMcap, mark);
@@ -2299,13 +2451,23 @@ export const useTrench = create<TrenchState>()(
           if (s0.ticking) return;
           const watching = s0.status === "watch";
           if (!watching && !hush("hot:only", 300_000)) {
-            log("TILL", "sys", "paper fills off. only HOT wallet spends. no clip without a send.");
-            const liveBag = (p: Position) => !!(p.live || isLiveMint(p.mint));
-            set((s) => ({
-              positions: s.positions.filter(liveBag),
-              rival: s.rival ? { ...s.rival, positions: s.rival.positions.filter(liveBag) } : s.rival,
-              extra: s.extra ? { ...s.extra, positions: s.extra.positions.filter(liveBag) } : s.extra,
-            }));
+            if (shadowLearnOn()) {
+              log(
+                "TILL",
+                "sys",
+                hotAutoArmed()
+                  ? "profit loop on. HOT spends when armed; SHADOW books skips for learning."
+                  : "SHADOW_LEARN on. HOT off — desk books paper shadows. arm HOT to spend SOL/ETH.",
+              );
+            } else {
+              log("TILL", "sys", "paper fills off. only HOT wallet spends. no clip without a send.");
+              const liveBag = (p: Position) => !!(p.live || isLiveMint(p.mint));
+              set((s) => ({
+                positions: s.positions.filter(liveBag),
+                rival: s.rival ? { ...s.rival, positions: s.rival.positions.filter(liveBag) } : s.rival,
+                extra: s.extra ? { ...s.extra, positions: s.extra.positions.filter(liveFb) } : s.extra,
+              }));
+            }
           }
           const vetOn = !s0.vetDead && (s0.status === "alive" || s0.status === "survived");
           const hatchLive = hatchOn(s0.rival);
@@ -2687,15 +2849,19 @@ export const useTrench = create<TrenchState>()(
                 leftover.push(coin);
                 continue;
               }
-              if (scored.score < floorOf(st.playbook)) {
-                recordKill(
-                  "score",
-                  coin,
-                  `scored ${scored.score} vs floor ${floorOf(st.playbook)}. no beats the sniper.`,
-                  now,
-                );
-                leftover.push(coin);
-                continue;
+              {
+                const heat = st.tapeVenue === "pons" ? st.heatPons : st.heatPump;
+                const floor = ripperFloor(floorOf(st.playbook), coin, now, heat);
+                if (scored.score < floor) {
+                  recordKill(
+                    "score",
+                    coin,
+                    `scored ${scored.score} vs floor ${floor}. no beats the sniper.`,
+                    now,
+                  );
+                  leftover.push(coin);
+                  continue;
+                }
               }
               if (scarSit(st.closed, now)) {
                 if (!hush("scar:vet", 90_000)) {
@@ -2721,7 +2887,7 @@ export const useTrench = create<TrenchState>()(
                 continue;
               }
 
-              await fireLive("vet", coin, scored.score);
+              await tryClip("vet", coin, scored.score);
             }
 
             if (hatchOn(get().rival)) {
@@ -2744,11 +2910,17 @@ export const useTrench = create<TrenchState>()(
                 if (occupiedMints(st).has(coin.mint)) continue;
                 if (occupiedTickers(st).has(coin.symbol.toLowerCase())) continue;
                 const scored = scoreSetup(coin, st.meta, now, r.playbook);
-                if (scored.score < floorOf(r.playbook)) {
+                const hatchFloor = ripperFloor(
+                  floorOf(r.playbook),
+                  coin,
+                  now,
+                  st.tapeVenue === "pons" ? st.heatPons : st.heatPump,
+                );
+                if (scored.score < hatchFloor) {
                   log(
                     "WARDEN",
                     "kill",
-                    `${hatchTag()} · veto $${coin.symbol} — scored ${scored.score} vs floor ${floorOf(r.playbook)}. no beats the sniper.`,
+                    `${hatchTag()} · veto $${coin.symbol} — scored ${scored.score} vs floor ${hatchFloor}. no beats the sniper.`,
                     { mint: coin.mint, symbol: coin.symbol },
                   );
                   set((s) =>
@@ -2780,7 +2952,7 @@ export const useTrench = create<TrenchState>()(
                   }
                   continue;
                 }
-                await fireLive("hatch", coin, scored.score);
+                await tryClip("hatch", coin, scored.score);
               }
             }
 
@@ -2792,11 +2964,17 @@ export const useTrench = create<TrenchState>()(
                 if (occupiedMints(st).has(coin.mint)) continue;
                 if (occupiedTickers(st).has(coin.symbol.toLowerCase())) continue;
                 const scored = scoreSetup(coin, st.meta, now, r.playbook);
-                if (scored.score < floorOf(r.playbook)) {
+                const cubFloor = ripperFloor(
+                  floorOf(r.playbook),
+                  coin,
+                  now,
+                  st.tapeVenue === "pons" ? st.heatPons : st.heatPump,
+                );
+                if (scored.score < cubFloor) {
                   log(
                     "WARDEN",
                     "kill",
-                    `${cubTag()} · veto $${coin.symbol} — scored ${scored.score} vs floor ${floorOf(r.playbook)}. no beats the sniper.`,
+                    `${cubTag()} · veto $${coin.symbol} — scored ${scored.score} vs floor ${cubFloor}. no beats the sniper.`,
                     { mint: coin.mint, symbol: coin.symbol },
                   );
                   set((s) =>
@@ -2828,7 +3006,7 @@ export const useTrench = create<TrenchState>()(
                   }
                   continue;
                 }
-                await fireLive("cub", coin, scored.score);
+                await tryClip("cub", coin, scored.score);
               }
             }
 

@@ -314,10 +314,18 @@ export const TRAIL_GIVE_PONS = 0.16;
 export const HARD_TAKE_PONS = 0.85;
 export const GREEN_ARM = 0.08;
 export const GREEN_KEEP = 0.02;
+/** Bank any green once past fees+slip (~1% fee + slip). Prefer take over waiting on runners. */
+export const MIN_BANK_PCT = 0.04;
+/** After a scar streak, bank even earlier. */
+export const MIN_BANK_SCAR_PCT = 0.03;
+/** How much ripper momentum may cut the score floor (mcap window + fresh/heat). */
+export const RIPPER_FLOOR_CUT = 8;
 export const PULSE_MS = 8_000;
 export const PULSE_PEAK = 0.06;
 export const HOT_TRADE_MS = 60_000;
 export const HOT_PUNCH = 80;
+/** Quiet-gate punch for high-heat / fresh tape rippers (below HOT_PUNCH). */
+export const RIPPER_PUNCH = 55;
 export const HUNT_MCAP_MIN = 25_000;
 export const HUNT_MCAP_MAX = 400_000;
 export const HOT_MCAP_PONS = HUNT_MCAP_MIN;

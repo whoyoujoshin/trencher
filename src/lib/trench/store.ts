@@ -2465,7 +2465,7 @@ export const useTrench = create<TrenchState>()(
               set((s) => ({
                 positions: s.positions.filter(liveBag),
                 rival: s.rival ? { ...s.rival, positions: s.rival.positions.filter(liveBag) } : s.rival,
-                extra: s.extra ? { ...s.extra, positions: s.extra.positions.filter(liveFb) } : s.extra,
+                extra: s.extra ? { ...s.extra, positions: s.extra.positions.filter(liveBag) } : s.extra,
               }));
             }
           }

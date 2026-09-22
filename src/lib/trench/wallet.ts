@@ -2,6 +2,7 @@ import { Keypair, VersionedTransaction } from "@solana/web3.js";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { buildLiveTrade, buildPonsTrade, fetchEthBalance, fetchHotBalance, listHotBags, sendSignedEthTx, sendSignedTx, waitEthReceipt } from "./server";
 import { isEvmMint } from "./types";
+import { solRpcUrl } from "./sol-rpc";
 
 const KEY = "trencher-wallet-v1";
 const SIGN_KEY = "trencher-sign-one";
@@ -9,9 +10,11 @@ const HOT_KEY = "trencher-hot-v1";
 const HOT_ARM = "trencher-hot-auto";
 const LIVE_MINTS = "trencher-live-mints";
 
-export const LIVE_CAP_SOL = 0.02;
-export const LIVE_CAP_ETH = 0.001;
+export const LIVE_CAP_SOL = 0.04;
+export const LIVE_CAP_ETH = 0.002;
 export const LIVE_ETH_USD = 2500;
+export const LIVE_SOL_FUND = 0.1;
+export const LIVE_ETH_FUND = 0.004;
 const ETH_KEY = "trencher-eth-hot-v1";
 
 export function markLiveMint(mint: string) {
@@ -313,8 +316,8 @@ export async function signOneBuy(mint: string, symbol: string): Promise<{ ok: bo
   } catch {
     /* still try */
   }
-  if (sol > 0 && sol < LIVE_CAP_SOL + 0.003) {
-    return { ok: false, text: `wallet has ${sol.toFixed(3)} SOL. need ${LIVE_CAP_SOL} plus fee.` };
+  if (sol > 0 && sol < LIVE_CAP_SOL + 0.005) {
+    return { ok: false, text: `LIVE skip · dry. wallet has ${sol.toFixed(3)} SOL. need ${LIVE_CAP_SOL} plus fee.` };
   }
   const built = await buildLiveTrade({ data: { publicKey: pubkey, mint, action: "buy" } });
   if (!built.ok) return { ok: false, text: `portal: ${built.error}` };
@@ -327,7 +330,7 @@ export async function signOneBuy(mint: string, symbol: string): Promise<{ ok: bo
     markLiveMint(mint);
     return {
       ok: true,
-      text: `SIGNED · 0.02 SOL buy $${symbol} · ${sig.slice(0, 8)}… · sign-one spent. https://solscan.io/tx/${sig}`,
+      text: `SIGNED · ${LIVE_CAP_SOL} SOL buy $${symbol} · ${sig.slice(0, 8)}… · sign-one spent. https://solscan.io/tx/${sig}`,
     };
   } catch (e) {
     return { ok: false, text: e instanceof Error ? e.message : "sign rejected." };
@@ -345,8 +348,8 @@ export async function hotBuy(mint: string, symbol: string): Promise<{ ok: boolea
   } catch {
     return { ok: false, text: "could not read hot balance." };
   }
-  if (sol < LIVE_CAP_SOL + 0.003) {
-    return { ok: false, text: `hot has ${sol.toFixed(3)} SOL. send at least 0.05. auto skipped.` };
+  if (sol < LIVE_CAP_SOL + 0.005) {
+    return { ok: false, text: `LIVE skip · dry. hot has ${sol.toFixed(3)} SOL. send at least ${LIVE_SOL_FUND}.` };
   }
   const built = await buildLiveTrade({ data: { publicKey: pubkey, mint, action: "buy" } });
   if (!built.ok) return { ok: false, text: `portal: ${built.error}` };
@@ -355,14 +358,14 @@ export async function hotBuy(mint: string, symbol: string): Promise<{ ok: boolea
     const tx = VersionedTransaction.deserialize(raw);
     tx.sign([kp]);
     const signed = bytesToB64(tx.serialize());
-    const sent = await sendSignedTx({ data: { txB64: signed } });
+    const sent = await sendSignedTx({ data: { txB64: signed, rpc: solRpcUrl() } });
     if (!sent.ok || !sent.sig) {
-      return { ok: false, text: `HOT send failed: ${sent.error}` };
+      return { ok: false, text: `LIVE skip · 403. HOT send failed: ${sent.error}` };
     }
     markLiveMint(mint);
     return {
       ok: true,
-      text: `HOT · 0.02 SOL $${symbol} · ${sent.sig.slice(0, 8)}… https://solscan.io/tx/${sent.sig}`,
+      text: `HOT · ${LIVE_CAP_SOL} SOL $${symbol} · ${sent.sig.slice(0, 8)}… https://solscan.io/tx/${sent.sig}`,
     };
   } catch (e) {
     return { ok: false, text: e instanceof Error ? e.message : "hot send failed." };
@@ -382,7 +385,7 @@ async function signHot(
   const raw = Uint8Array.from(atob(built.txB64), (c) => c.charCodeAt(0));
   const tx = VersionedTransaction.deserialize(raw);
   tx.sign([kp]);
-  const sent = await sendSignedTx({ data: { txB64: bytesToB64(tx.serialize()), confirm: !dump } });
+  const sent = await sendSignedTx({ data: { txB64: bytesToB64(tx.serialize()), confirm: !dump, rpc: solRpcUrl() } });
   if (!sent.ok || !sent.sig) return { ok: false, error: sent.error || "send failed" };
   return { ok: true, sig: sent.sig };
 }
@@ -541,19 +544,19 @@ export async function ethHotBuy(mint: string, symbol: string): Promise<{ ok: boo
   } catch {
     return { ok: false, text: "could not read ETH hot." };
   }
-  if (eth < LIVE_CAP_ETH + 0.0002) {
-    return { ok: false, text: `ETH hot has ${eth.toFixed(4)} ETH. send at least 0.002. auto skipped.` };
+  if (eth < LIVE_CAP_ETH + 0.0004) {
+    return { ok: false, text: `LIVE skip · dry. ETH hot has ${eth.toFixed(4)} ETH. send at least ${LIVE_ETH_FUND}.` };
   }
   const built = await buildPonsTrade({ data: { from: hot.address, mint, action: "buy" } });
   if (!built.ok) return { ok: false, text: `pons: ${built.error}` };
   try {
     const sent = await signAndSendEthSteps(built.steps);
-    if (!sent.ok || !sent.hash) return { ok: false, text: `ETH send failed: ${sent.error}` };
+    if (!sent.ok || !sent.hash) return { ok: false, text: `LIVE skip · 403. ETH send failed: ${sent.error}` };
     markLiveMint(mint);
     return {
       ok: true,
       hash: sent.hash,
-      text: `HOT · 0.001 ETH $${symbol} · ${sent.hash.slice(0, 10)}… https://robinhoodchain.blockscout.com/tx/${sent.hash}`,
+      text: `HOT · ${LIVE_CAP_ETH} ETH $${symbol} · ${sent.hash.slice(0, 10)}… https://robinhoodchain.blockscout.com/tx/${sent.hash}`,
     };
   } catch (e) {
     return { ok: false, text: e instanceof Error ? e.message : "eth hot send failed." };

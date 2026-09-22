@@ -66,6 +66,19 @@ export function heatPlaybook(book: Playbook, round: number, shift = 0): Playbook
   };
 }
 
+export function ponsCurveLive(
+  coin: Pick<PumpCoin, "mint" | "curve" | "description" | "venue">,
+): boolean {
+  if (!isEvmMint(coin.mint)) return false;
+  const curve = (coin.curve ?? "").toLowerCase();
+  if (!isEvmMint(curve)) return false;
+  const line = (coin.description ?? "").toLowerCase();
+  if (line.includes("hood.fun") || line.includes("pools.trade") || line.includes("pons v1")) {
+    return false;
+  }
+  return true;
+}
+
 export function cheapKill(coin: PumpCoin, now: number): string | null {
   if (coin.banned || coin.nsfw) return "banned or flagged. not touching it.";
   const pons = coin.venue === "pons";
@@ -139,7 +152,7 @@ export function setupMatch(coin: PumpCoin, meta: MetaState, now: number): string
 }
 
 export function hotLiveBlock(
-  coin: Pick<PumpCoin, "mint" | "symbol" | "usdMcap" | "lastTradeAt" | "venue">,
+  coin: Pick<PumpCoin, "mint" | "symbol" | "usdMcap" | "lastTradeAt" | "createdAt" | "venue">,
   now: number,
   score = 0,
 ): string | null {
@@ -156,8 +169,12 @@ export function hotLiveBlock(
   if (coin.usdMcap < HUNT_MCAP_MIN || coin.usdMcap > HUNT_MCAP_MAX) {
     return `live skip $${coin.symbol} — mcap ${Math.round(coin.usdMcap)} outside the window. paper only.`;
   }
-  if (coin.lastTradeAt == null || now - coin.lastTradeAt > HOT_TRADE_MS) {
+  const last = coin.lastTradeAt && coin.lastTradeAt < 1e12 ? coin.lastTradeAt * 1000 : coin.lastTradeAt;
+  const born = coin.createdAt && coin.createdAt < 1e12 ? coin.createdAt * 1000 : coin.createdAt;
+  const quiet = last == null || now - last > HOT_TRADE_MS;
+  if (quiet) {
     if (score >= HOT_PUNCH) return null;
+    if (born && now - born <= HOT_TRADE_MS) return null;
     return `live skip $${coin.symbol} — curve quiet. paper only.`;
   }
   return null;
@@ -343,6 +360,24 @@ function clamp(n: number, lo: number, hi: number): number {
   return Math.min(hi, Math.max(lo, n));
 }
 
+function medianOf(xs: number[]): number {
+  if (!xs.length) return 0;
+  const a = [...xs].sort((x, y) => x - y);
+  const m = Math.floor(a.length / 2);
+  return a.length % 2 ? a[m]! : (a[m - 1]! + a[m]!) / 2;
+}
+
+/** Trail arm from blotter peaks: sit under the typical run so trail fires before the rug. */
+export function peakArmTarget(print: TapePrint, venue: TapeVenue): number | null {
+  if (print.peakN < 4 || print.medianPeak < GREEN_ARM) return null;
+  const lo = venue === "pons" ? 0.2 : 0.18;
+  const hi = 0.35;
+  let target = print.medianPeak * 0.55;
+  if (print.missedPct >= 0.12) target -= 0.03;
+  if (print.missedPct >= 0.22) target -= 0.03;
+  return Math.round(clamp(target, lo, hi) * 100) / 100;
+}
+
 export function emptyPrint(venue: TapeVenue): TapePrint {
   return {
     n: 0,
@@ -361,6 +396,9 @@ export function emptyPrint(venue: TapeVenue): TapePrint {
     runners: 0,
     heatScore: 0,
     venue,
+    medianPeak: 0,
+    missedPct: 0,
+    peakN: 0,
   };
 }
 
@@ -404,6 +442,14 @@ export function windowPrint(
   }
   const avgHold = closed.reduce((s, t) => s + t.heldMs, 0) / n;
   const hotN = closed.filter(isHotFill).length;
+  const peaks = closed
+    .map((t) => t.peakPct ?? 0)
+    .filter((p) => p >= GREEN_ARM);
+  const missed = closed
+    .filter((t) => (t.peakPct ?? 0) >= GREEN_ARM)
+    .map((t) => Math.max(0, (t.peakPct ?? 0) - t.pnlPct));
+  const medianPeak = medianOf(peaks);
+  const missedPct = medianOf(missed);
   return {
     n,
     takePct: take / n,
@@ -421,6 +467,9 @@ export function windowPrint(
     runners: heat?.ok ? heat.runners : 0,
     heatScore: heat?.ok ? heat.score : 0,
     venue,
+    medianPeak,
+    missedPct,
+    peakN: peaks.length,
   };
 }
 
@@ -525,6 +574,13 @@ export function writeWeather(
   }
   greenKeep = 0.02;
 
+  const peakTarget = peakArmTarget(print, print.venue);
+  if (peakTarget != null) {
+    const step = (from: number) => clamp(from + clamp(peakTarget - from, -0.06, 0.06), print.venue === "pons" ? 0.2 : 0.18, 0.35);
+    if (print.venue === "pons") trailArm = step(trailArm);
+    else trailArmPump = step(trailArmPump);
+  }
+
   let venue: Weather["venue"] = "stay";
   if (kinds.includes("venue") && other?.ok && other.venue !== print.venue) {
     venue = other.venue;
@@ -554,6 +610,9 @@ export function formatWeather(w: Weather, tape: TapeVenue): string {
   const bits = [w.kind.join("+") || "hold", `bar ${w.bar}`, `size ${w.size.toFixed(1)}`];
   if (tape === "pons") bits.push(`sit ${Math.round(w.sitMs / 1000)}s`);
   bits.push(`arm +${Math.round(spec.arm * 100)}`);
+  if ((w.print?.peakN ?? 0) >= 4 && (w.print?.medianPeak ?? 0) > 0) {
+    bits.push(`peak +${Math.round(w.print!.medianPeak * 100)}`);
+  }
   bits.push(`protect +${Math.round((w.greenArm ?? GREEN_ARM) * 100)}`);
   bits.push(w.venue);
   return bits.join(" · ");
@@ -584,9 +643,7 @@ export function paperFloor(book: Playbook, weather: Weather, spirit: number): nu
 }
 
 export function liveFloor(book: Playbook, weather: Weather, spirit: number): number {
-  const paper = paperFloor(book, weather, spirit);
-  const cap = Math.max(paper, Math.max(40, spirit));
-  return clamp(paper + 4, paper, cap);
+  return paperFloor(book, weather, spirit);
 }
 
 export function minClip(venue?: TapeVenue): number {

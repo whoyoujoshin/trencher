@@ -348,6 +348,9 @@ export type TapePrint = {
   runners: number;
   heatScore: number;
   venue: TapeVenue;
+  medianPeak: number;
+  missedPct: number;
+  peakN: number;
 };
 
 export type Weather = {

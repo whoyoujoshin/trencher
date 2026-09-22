@@ -15,7 +15,6 @@ import {
   AGENTS,
   CYCLE_MS,
   CYCLE_PONS_MS,
-  ROUND_MS,
   STARTING_CASH,
   TRAIL_ARM,
   TRAIL_GIVE,
@@ -34,6 +33,7 @@ import {
 import { ageLabel, cn, elapsed, formatPct, formatUsd, shortAddr, vaultPressure } from "@/lib/utils";
 import { ntfyTopic, pingNtfy, setNtfyTopic } from "@/lib/trench/ntfy";
 import { gmgnKey, setGmgnKey } from "@/lib/trench/gmgn";
+import { setSolRpcUrl, solRpcUrl } from "@/lib/trench/sol-rpc";
 import { amHunter, chamberEyes, deskPin, seatCloud, syncCloud, unlockCloud } from "@/lib/trench/cloud";
 import {
   connectWallet,
@@ -51,7 +51,7 @@ import {
   setHotAuto,
   signOneState,
 } from "@/lib/trench/wallet";
-import { blankPlaybook, clipsInDay, formatWeather, liveFloor, paperFloor, pickHotLane, pnlPct, positionValue, protectSpec, trailSpec, wardenScore } from "@/lib/trench/logic";
+import { blankPlaybook, clipsInDay, formatWeather, liveFloor, pickHotLane, pnlPct, positionValue, protectSpec, trailSpec, wardenScore } from "@/lib/trench/logic";
 import { hardReload } from "@/lib/error-component";
 
 const ICONS: Record<AgentId, typeof Radio> = {
@@ -72,7 +72,7 @@ function railOf(
     const liveHit = logs.some(
       (l) =>
         (l.mint === t.mint || l.symbol === t.symbol || l.text.includes(`$${t.symbol}`)) &&
-        (l.text.includes("HOT ETH") || l.text.includes("0.001 ETH")),
+        (l.text.includes("HOT ETH") || l.text.includes("0.002 ETH") || l.text.includes("0.001 ETH")),
     );
     return liveHit ? "eth" : "paper";
   }
@@ -336,6 +336,48 @@ function GmgnDock() {
   );
 }
 
+function RpcDock() {
+  const [url, setUrl] = useState("");
+  const [armed, setArmed] = useState("");
+  const [msg, setMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    const u = solRpcUrl();
+    setUrl(u);
+    setArmed(u);
+  }, []);
+
+  function save() {
+    const err = setSolRpcUrl(url);
+    if (err) {
+      setMsg(err);
+      return;
+    }
+    const u = solRpcUrl();
+    setArmed(u);
+    setMsg(u ? "sends only. confirms stay public so Helius credits last." : "RPC off. public endpoints only.");
+  }
+
+  return (
+    <div className="flex flex-wrap items-center gap-2">
+      <input
+        value={url}
+        onChange={(e) => setUrl(e.target.value)}
+        placeholder="Helius RPC URL"
+        spellCheck={false}
+        autoCapitalize="off"
+        autoCorrect="off"
+        type="password"
+        className="h-9 w-44 border border-line bg-elevated px-2 font-mono text-2xs text-fg placeholder:text-subtle"
+      />
+      <Button size="sm" variant="ghost" onClick={save}>
+        {armed ? "rpc on" : "Arm RPC"}
+      </Button>
+      {msg ? <p className="font-mono text-2xs text-subtle">{msg}</p> : null}
+    </div>
+  );
+}
+
 function NtfyDock() {
   const [topic, setTopic] = useState("");
   const [armed, setArmed] = useState("");
@@ -454,11 +496,11 @@ function WalletDock() {
       input.setSelectionRange(0, hotPk.length);
     }
     void navigator.clipboard.writeText(hotPk).then(
-      () => setMsg("hot address copied. send ~0.05 SOL. not your phantom."),
+      () => setMsg("hot address copied. send ~0.10 SOL. not your phantom."),
       () => {
         try {
           document.execCommand("copy");
-          setMsg("hot address copied. send ~0.05 SOL.");
+          setMsg("hot address copied. send ~0.10 SOL.");
         } catch {
           setMsg("highlight the address and ctrl+c. clipboard is blocked.");
         }
@@ -469,7 +511,7 @@ function WalletDock() {
   function copyEth() {
     if (!ethPk) return;
     void navigator.clipboard.writeText(ethPk).then(
-      () => setMsg("ETH hot copied. send ~0.002 ETH on Robinhood Chain (4663). not your phantom."),
+      () => setMsg("ETH hot copied. send ~0.004 ETH on Robinhood Chain (4663). not your phantom."),
       () => setMsg("highlight the ETH address and ctrl+c."),
     );
   }
@@ -518,8 +560,8 @@ function WalletDock() {
     setMsg(
       on
         ? tapeVenue === "pons"
-          ? "HOT AUTO on. Pons fills spend 0.001 ETH. SOL stays on pump."
-          : "HOT AUTO on. Hatch fills spend 0.02 SOL. no popup. telegram-bot rules."
+          ? "HOT AUTO on. Pons spends 0.002 ETH. SOL spends 0.04 on pump. no paper."
+          : "HOT AUTO on. spends 0.04 SOL. no paper. no popup."
         : "hot auto off.",
     );
   }
@@ -751,7 +793,7 @@ function WakeScreen({
     <main className="relative flex min-h-dvh flex-col justify-between bg-bg px-5 py-8 sm:px-10 sm:py-12">
       <header className="flex items-center justify-between text-muted">
         <p className="font-mono text-2xs tracking-kicker uppercase">paper trench</p>
-        <p className="font-mono text-2xs tracking-label uppercase">pump.fun · Pons paper</p>
+        <p className="font-mono text-2xs tracking-label uppercase">pump.fun · RH chain paper</p>
       </header>
 
       <section className="mx-auto flex w-full max-w-xl flex-col gap-6 py-10">
@@ -766,7 +808,7 @@ function WakeScreen({
           burns the wallet, Sniper raises the floor, Risk tightens the stop, never
           widens it. Stake {formatUsd(STARTING_CASH, 0)}. The gate starts at {formatUsd(gateUsd(1), 0)}
           and climbs each cell — Warden climbs with it. Pay the gate or get deleted.
-          Pump.fun is live SOL. Pons is live ETH on the V2 curve — 0.001 ETH cap. Fund the ETH hot.
+          Pump.fun is HOT SOL. Robinhood Chain is HOT ETH on the Pons curve. Other RH pads are skipped until a router exists. No paper fills.
         </p>
         <div className="stagger-in flex flex-col gap-3 sm:flex-row sm:items-center">
           {hunting ? (
@@ -796,6 +838,7 @@ function WakeScreen({
           ) : null}
           <BookDock />
           <GmgnDock />
+          <RpcDock />
           <CloudDock eyes={eyes} role={role} />
           <p className="font-mono text-2xs leading-relaxed text-subtle">
             Second window is a blank cell. Do not stake. Load the book JSON from Downloads.
@@ -891,7 +934,6 @@ function Desk({
   const vetDead = useTrench((s) => s.vetDead);
   const rival = useTrench((s) => s.rival);
   const extra = useTrench((s) => s.extra);
-  const houseBank = useTrench((s) => s.houseBank);
   const hotSol = useTrench((s) => s.hotSol);
   const hotPubkey = useTrench((s) => s.hotPubkey);
   const hotEth = useTrench((s) => s.hotEth);
@@ -901,9 +943,10 @@ function Desk({
   const lastGmgn = useTrench((s) => s.lastGmgn);
   const spiritFloor = useSpirit((s) => s.canon.scoreFloor);
   const round = useTrench((s) => s.round) || 1;
-  const roundStartedAt = useTrench((s) => s.roundStartedAt);
   const focus = useTrench((s) => s.focus);
   const spawnRival = useTrench((s) => s.spawnRival);
+  const setSoloDesk = useTrench((s) => s.setSoloDesk);
+  const soloDesk = useTrench((s) => s.soloDesk);
   const cull = useTrench((s) => s.cull);
   const killClone = useTrench((s) => s.killClone);
   const setFocus = useTrench((s) => s.setFocus);
@@ -964,9 +1007,6 @@ function Desk({
   const hatchLive = !!rival && (rival.status === "alive" || rival.status === "survived");
   const cubLive = !!extra && (extra.status === "alive" || extra.status === "survived");
   const vetLive = !vetDead && (status === "alive" || status === "survived");
-  const eqV = equityNow(vetCash, vetPositions);
-  const eqH = rival ? equityNow(rival.cash, rival.positions) : 0;
-  const eqC = extra ? equityNow(extra.cash, extra.positions) : 0;
   const liveCount = (vetLive ? 1 : 0) + (hatchLive ? 1 : 0) + (cubLive ? 1 : 0);
   const clipsV = clipsInDay(vetDayHits, vetClosed, now);
   const clipsH = rival ? clipsInDay(rival.dayHits, rival.closed, now) : 0;
@@ -1021,6 +1061,19 @@ function Desk({
             <StatusChip status={status} ticking={ticking} error={tapeError} />
             <TapeSwitch venue={tapeVenue} onChange={setTapeVenue} />
             {status !== "watch" ? (
+              <button
+                type="button"
+                onClick={() => setSoloDesk(!soloDesk)}
+                title={soloDesk ? "Solo. Click to allow twins." : "Three chairs. Click for one hunter."}
+                className={cn(
+                  "border px-2 py-1 font-mono text-2xs tracking-label uppercase",
+                  soloDesk ? "border-warn text-warn" : "border-line text-muted hover:text-fg",
+                )}
+              >
+                {soloDesk ? "solo" : "pit"}
+              </button>
+            ) : null}
+            {status !== "watch" ? (
             <div className="flex items-center gap-1">
               <button
                 type="button"
@@ -1031,7 +1084,7 @@ function Desk({
                 )}
               >
                 <span>
-                  {vetSign} {vetLive ? (rentPaid ? `rest ${formatUsd(eqV)}` : formatUsd(eqV)) : "dead"}
+                  {vetSign} {vetLive ? (rentPaid ? "rest" : "hunt") : "dead"}
                 </span>
                 <CloneTally open={vetLive ? vetPositions : []} clips={clipsV} hot={clipsMax} />
               </button>
@@ -1045,7 +1098,7 @@ function Desk({
                   )}
                 >
                   <span>
-                    {hatchSign} {hatchLive ? (rival.rentPaid ? `rest ${formatUsd(eqH)}` : formatUsd(eqH)) : "dead"}
+                    {hatchSign} {hatchLive ? (rival.rentPaid ? "rest" : "hunt") : "dead"}
                   </span>
                   <CloneTally open={hatchLive ? rival.positions : []} clips={clipsH} hot={clipsMax} />
                 </button>
@@ -1060,7 +1113,7 @@ function Desk({
                   )}
                 >
                   <span>
-                    {cubSign} {cubLive ? (extra.rentPaid ? `rest ${formatUsd(eqC)}` : formatUsd(eqC)) : "dead"}
+                    {cubSign} {cubLive ? (extra.rentPaid ? "rest" : "hunt") : "dead"}
                   </span>
                   <CloneTally open={cubLive ? extra.positions : []} clips={clipsC} hot={clipsMax} />
                 </button>
@@ -1068,14 +1121,13 @@ function Desk({
             </div>
             ) : null}
           </div>
-          <p className="ml-auto font-mono text-2xs tracking-label text-subtle uppercase">paper usd</p>
           <dl className="flex flex-wrap items-center gap-x-5 gap-y-1 font-mono text-xs tabular-nums">
             {(rival || extra) && status !== "watch" ? (
               <>
                 <Stat
                   label={vetSign}
-                  value={vetLive ? formatUsd(eqV) : "dead"}
-                  tone={!vetLive ? "loss" : eqV - STARTING_CASH >= 0 ? "gain" : "loss"}
+                  value={vetLive ? (rentPaid ? "rest" : "hunt") : "dead"}
+                  tone={!vetLive ? "loss" : undefined}
                   dots={vetLive ? vetPositions : []}
                   clips={clipsV}
                   clipsHot={clipsMax}
@@ -1083,8 +1135,8 @@ function Desk({
                 {rival ? (
                   <Stat
                     label={hatchSign}
-                    value={hatchLive ? formatUsd(eqH) : "dead"}
-                    tone={!hatchLive ? "loss" : eqH - STARTING_CASH >= 0 ? "gain" : "loss"}
+                    value={hatchLive ? (rival.rentPaid ? "rest" : "hunt") : "dead"}
+                    tone={!hatchLive ? "loss" : undefined}
                     dots={hatchLive ? rival.positions : []}
                     clips={clipsH}
                     clipsHot={clipsMax}
@@ -1093,22 +1145,15 @@ function Desk({
                 {extra ? (
                   <Stat
                     label={cubSign}
-                    value={cubLive ? formatUsd(eqC) : "dead"}
-                    tone={!cubLive ? "loss" : eqC - STARTING_CASH >= 0 ? "gain" : "loss"}
+                    value={cubLive ? (extra.rentPaid ? "rest" : "hunt") : "dead"}
+                    tone={!cubLive ? "loss" : undefined}
                     dots={cubLive ? extra.positions : []}
                     clips={clipsC}
                     clipsHot={clipsMax}
                   />
                 ) : null}
               </>
-            ) : (
-              <Stat
-                label="Equity"
-                value={status === "watch" ? "—" : formatUsd(equity)}
-                tone={status === "watch" ? undefined : pnl >= 0 ? "gain" : "loss"}
-              />
-            )}
-            <Stat label="Cash" value={status === "watch" ? "—" : formatUsd(cash)} />
+            ) : null}
             <Stat
               label="PnL"
               value={status === "watch" ? "watch" : `${pnl >= 0 ? "+" : ""}${formatUsd(pnl)}`}
@@ -1118,11 +1163,6 @@ function Desk({
               label="Fees"
               value={formatUsd(feesPaid ?? 0)}
               tone={(feesPaid ?? 0) > 0 ? "loss" : undefined}
-            />
-            <Stat
-              label="Gate"
-              value={rentPaid ? "paid" : formatUsd(due, 0)}
-              tone={rentPaid ? "gain" : "warn"}
             />
             <Stat label="Scanned" value={scanned.toLocaleString()} />
             <Stat
@@ -1144,32 +1184,12 @@ function Desk({
             />
             <Stat label="Clock" value={startedAt ? elapsed(startedAt, now) : "00:00"} />
             <Stat
-              label="Round"
-              value={
-                roundStartedAt
-                  ? (() => {
-                      const left = Math.max(0, ROUND_MS - (now - roundStartedAt));
-                      const d = Math.floor(left / 86_400_000);
-                      const h = Math.floor((left % 86_400_000) / 3_600_000);
-                      return `R${round || 1} ${d}d ${h}h`;
-                    })()
-                  : `R${round || 1}`
-              }
-            />
-            <Stat
-              label="Bank"
-              value={formatUsd(houseBank ?? 0)}
-              tone={(houseBank ?? 0) > 0 ? "gain" : undefined}
-            />
-            <Stat
               label="Win"
               value={closed.length ? `${(winPct * 100).toFixed(0)}%` : "—"}
               tone={
                 !closed.length ? undefined : winPct >= 0.45 ? "gain" : winPct < 0.3 ? "loss" : "warn"
               }
             />
-            <Stat label="Rank" value={rank.label} />
-            <Stat label="Clone" value={String(house?.generation || 1)} />
             <Stat
               label="Vault"
               value={vault.label}
@@ -1179,32 +1199,32 @@ function Desk({
         </div>
         <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-gain/25 bg-gain/5 px-4 py-2 sm:px-6">
           <p className="font-mono text-2xs tracking-label text-gain uppercase">
-            {tapeVenue === "pons" ? "real eth" : "real sol"}
+            real sol · real eth
           </p>
           <dl className="flex flex-wrap items-center gap-x-5 gap-y-1 font-mono text-xs tabular-nums">
             <Stat
-              label="Hot"
+              label="SOL"
+              value={hotSol == null ? "—" : `${hotSol.toFixed(3)} SOL`}
+              tone={(hotSol ?? 0) >= 0.045 ? "gain" : (hotSol ?? 0) > 0 ? "warn" : undefined}
+            />
+            <Stat
+              label="ETH"
+              value={hotEth == null ? "—" : `${hotEth.toFixed(4)} ETH`}
+              tone={(hotEth ?? 0) >= 0.0024 ? "gain" : (hotEth ?? 0) > 0 ? "warn" : undefined}
+            />
+            <Stat
+              label="Rail"
               value={
                 tapeVenue === "pons"
-                  ? hotEth == null
-                    ? "—"
-                    : `${hotEth.toFixed(4)} ETH`
-                  : hotSol == null
-                    ? "—"
-                    : `${hotSol.toFixed(3)} SOL`
+                  ? "rh"
+                  : hotAutoArmed() && (hotEth ?? 0) >= 0.0024
+                    ? "dual"
+                    : "pump"
               }
               tone={
-                tapeVenue === "pons"
-                  ? (hotEth ?? 0) >= 0.0012
-                    ? "gain"
-                    : (hotEth ?? 0) > 0
-                      ? "warn"
-                      : undefined
-                  : (hotSol ?? 0) >= 0.023
-                    ? "gain"
-                    : (hotSol ?? 0) > 0
-                      ? "warn"
-                      : undefined
+                tapeVenue === "pump" && hotAutoArmed() && (hotEth ?? 0) >= 0.0024
+                  ? "gain"
+                  : undefined
               }
             />
             <Stat
@@ -1220,13 +1240,9 @@ function Desk({
             <Stat
               label="Addr"
               value={
-                tapeVenue === "pons"
-                  ? hotEthAddr
-                    ? shortAddr(hotEthAddr, 4)
-                    : "—"
-                  : hotPubkey
-                    ? shortAddr(hotPubkey, 4)
-                    : "—"
+                [hotPubkey ? `sol ${shortAddr(hotPubkey, 4)}` : "", hotEthAddr ? `eth ${shortAddr(hotEthAddr, 4)}` : ""]
+                  .filter(Boolean)
+                  .join(" · ") || "—"
               }
             />
             <Stat
@@ -1237,6 +1253,7 @@ function Desk({
                   (l) =>
                     l.text.includes("HOT ·") ||
                     l.text.includes("HOT SELL") ||
+                    l.text.includes("LIVE skip") ||
                     l.text.includes("LIVE veto") ||
                     l.text.includes("SPIRIT veto") ||
                     l.text.startsWith("SIGNED"),
@@ -1278,16 +1295,15 @@ function Desk({
           </dl>
           <p className="font-mono text-2xs text-subtle">
             {tapeVenue === "pons"
-              ? "Cash, bank, the gate, PnL are paper. This row spends 0.001 ETH on the Pons curve. SOL stays on pump."
-              : "Cash, bank, the gate, PnL are paper. Only this row spends SOL."}
+              ? "Clips only book after HOT spends 0.002 ETH on the Pons curve. hood.fun / pools.trade have no router — skipped. SOL stays on pump."
+              : "Clips only book after HOT spends 0.04 SOL. no paper fills."}
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2 border-t border-line px-4 py-2 sm:px-6">
           <p className="mr-auto font-mono text-2xs tracking-wide text-muted">
             thesis · {meta.thesis}
             {meta.source === "grok" ? " · grok" : meta.source === "local" ? " · local" : ""}
-            {` · cell ${round} · gate ${due}`}
-            {" · "}floor {paperFloor(playbook, weather ?? blankWeather(), spiritFloor ?? 45)} paper · {liveFloor(playbook, weather ?? blankWeather(), spiritFloor ?? 45)} live
+            {" · "}floor {liveFloor(playbook, weather ?? blankWeather(), spiritFloor ?? 45)}
             {weather?.at ? ` · META ${formatWeather(weather, tapeVenue)}` : ""}
             {" · "}stop {(playbook.stopPct * 100).toFixed(0)}%
             {" · "}
@@ -1307,14 +1323,15 @@ function Desk({
                 ? " · gmgn on"
                 : ""}
             {` · ${cubFocus ? cubSign : hatchFocus ? hatchSign : vetSign}`}
-            {` · ${rank.label}`}
+            {soloDesk ? " · solo" : ""}
           </p>
           <BookDock compact />
           <NtfyDock />
           <GmgnDock />
+          <RpcDock />
           <CloudDock eyes={eyes} role={cloudRole} />
           <WalletDock />
-          {status !== "watch" && !cellFull && (vetLive || hatchLive || cubLive) ? (
+          {status !== "watch" && !soloDesk && !cellFull && (vetLive || hatchLive || cubLive) ? (
             <Button size="sm" variant="ghost" onClick={() => spawnRival()}>
               Wake a body
             </Button>
@@ -1342,7 +1359,7 @@ function Desk({
           >
             {focusSitting
               ? `${focusSign} sitting`
-              : `Pay ${focusSign} the gate ${formatUsd(due, 0)}`}
+              : `Pay ${focusSign} the gate`}
           </Button>
         </div>
       </header>
@@ -1407,7 +1424,7 @@ function TapeSwitch({
         )}
       >
         <span className="font-mono text-2xs tracking-label uppercase">
-          {v}
+          {v === "pons" ? "rh chain" : v}
           {hot ? " · hot" : ""}
         </span>
         <span className="font-mono text-micro tabular-nums text-subtle">{line}</span>
@@ -1833,7 +1850,7 @@ function Tape() {
   return (
     <section className="border-t border-line px-4 py-4 sm:px-5">
       <h2 className="font-mono text-2xs tracking-kicker text-muted uppercase">
-        Tape · {venue === "pons" ? "Pons V2 curve" : "pump.fun"}
+        Tape · {venue === "pons" ? "Robinhood Chain" : "pump.fun"}
       </h2>
       {tape.length === 0 ? (
         <p className="mt-3 text-sm text-muted">Scout has not returned yet.</p>
@@ -1851,7 +1868,7 @@ function Tape() {
                 </div>
                 <p className="truncate font-mono text-micro text-subtle">
                   {ageLabel(c.createdAt)} · {shortAddr(c.creator)}
-                  {venue === "pons" ? " · pons" : ""}
+                  {venue === "pons" ? " · rh" : ""}
                   {seenSet.has(c.mint) ? " · seen" : ""}
                 </p>
               </div>

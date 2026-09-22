@@ -58,6 +58,7 @@ import {
   liveFloor,
   formatWeather,
   emptyPrint,
+  peakArmTarget,
   gmgnLine,
   gmgnVeto,
   trailSpec,
@@ -67,11 +68,12 @@ import {
   punchedQuiet,
   stampDayHits,
   matchedMetaTokens,
+  ponsCurveLive,
 } from "./logic";
 import { ntfyHeartbeat, pingNtfy } from "./ntfy";
 import { gmgnKey } from "./gmgn";
 import { amHunter, deskPin, syncCloud } from "./cloud";
-import { LIVE_CAP_ETH, LIVE_CAP_SOL, LIVE_ETH_USD, ethHotBuy, ethHotSell, flattenHot as flattenHotBags, hotAutoArmed, hotBuy, hotSell, isLiveMint, refreshEthHot, refreshHot, shadowQuote, signOneBuy, signOneState } from "./wallet";
+import { LIVE_CAP_ETH, LIVE_CAP_SOL, LIVE_ETH_USD, LIVE_ETH_FUND, ethHotBuy, ethHotSell, flattenHot as flattenHotBags, hotAutoArmed, hotBuy, hotSell, isLiveMint, peekEthHot, refreshEthHot, refreshHot, signOneBuy, signOneState } from "./wallet";
 import { canonHasBlood, canonToMetaSeed, canonToPlaybook } from "./canon";
 import { useSpirit } from "./spirit";
 import {
@@ -172,6 +174,7 @@ type TrenchState = {
   feesPaid: number;
   rival: Rival | null;
   extra: Rival | null;
+  soloDesk: boolean;
   focus: LaneId;
   vetDead: boolean;
   housePot: number;
@@ -190,6 +193,7 @@ type TrenchState = {
   leaveHome: () => void;
   setTapeVenue: (venue: TapeVenue) => void;
   spawnRival: () => void;
+  setSoloDesk: (on: boolean) => void;
   cull: () => void;
   setFocus: (lane: LaneId) => void;
   spectate: () => void;
@@ -241,7 +245,7 @@ function blankHouse(): House {
 
 function initial(): Omit<
   TrenchState,
-  "setHydrated" | "arm" | "clone" | "killClone" | "payRent" | "dumpClip" | "dumpRunners" | "flattenHot" | "cycle" | "askMeta" | "readLosers" | "snapshotBook" | "ingestBook" | "spawnRival" | "cull" | "setFocus" | "spectate" | "goHome" | "leaveHome" | "setTapeVenue"
+  "setHydrated" | "arm" | "clone" | "killClone" | "payRent" | "dumpClip" | "dumpRunners" | "flattenHot" | "cycle" | "askMeta" | "readLosers" | "snapshotBook" | "ingestBook" | "spawnRival" | "setSoloDesk" | "cull" | "setFocus" | "spectate" | "goHome" | "leaveHome" | "setTapeVenue"
 > {
   return {
     hydrated: false,
@@ -280,6 +284,7 @@ function initial(): Omit<
     feesPaid: 0,
     rival: null,
     extra: null,
+    soloDesk: false,
     focus: "vet",
     vetDead: false,
     housePot: 0,
@@ -474,6 +479,10 @@ export const useTrench = create<TrenchState>()(
       let lastCap: LaneId | null = null;
       let liveBurst = 0;
       let liveBurstAt = 0;
+      let ethBurst = 0;
+      let ethBurstAt = 0;
+      let lastEthBuyAt = 0;
+      let lastHotBalAt = 0;
       let flatteningBags = false;
       const liveDebts: { mint: string; symbol: string }[] = [];
 
@@ -599,15 +608,113 @@ export const useTrench = create<TrenchState>()(
         set({ lastGmgn: { symbol, text, veto: !!g.veto, at: Date.now() } });
       }
 
-      function fireLive(lane: LaneId, coin: PumpCoin, score: number) {
+      function bookHotPos(lane: LaneId, coin: PumpCoin, score: number) {
+        const now = Date.now();
+        const fillUsd = liveNotional(coin.mint);
+        const feeUsd = paperFee(fillUsd);
+        const slipPct = paperSlip(coin.usdMcap);
+        const venue = venueOfMint(coin.mint);
+        const hatchBook = get().rival?.playbook;
+        const cubBook = get().extra?.playbook;
+        const book =
+          lane === "hatch" && hatchBook ? hatchBook : lane === "cub" && cubBook ? cubBook : get().playbook;
+        const mcap = Math.max(coin.usdMcap, 1);
+        const pos: Position = {
+          mint: coin.mint,
+          name: coin.name,
+          symbol: coin.symbol,
+          image: coin.image,
+          creator: coin.creator,
+          costUsd: fillUsd,
+          entryMcap: mcap,
+          peakMcap: mcap,
+          lastMcap: mcap,
+          openedAt: now,
+          score,
+          stopPct: clipStop(book, venue),
+          takePct: book.takePct,
+          intendedUsd: fillUsd,
+          slipPct,
+          feeUsd,
+          live: true,
+          liveCostUsd: fillUsd,
+          metaSource: get().meta.source,
+          metaHits: matchedMetaTokens(coin, get().meta),
+        };
+        const debit = fillUsd + feeUsd;
+        const spec = trailSpec(venue, wxNow());
+        const who = signOf(lane);
+        log(
+          "RISK",
+          "sys",
+          `${who} · HOT exit $${coin.symbol}: stop ${(clipStop(book, venue) * 100).toFixed(0)}% / ${
+            venue === "pons"
+              ? `hard +${((spec.hard ?? HARD_TAKE_PONS) * 100).toFixed(0)}% / trail +${(spec.arm * 100).toFixed(0)}% then give ${(spec.give * 100).toFixed(0)}% of peak.`
+              : `trail arms +${(spec.arm * 100).toFixed(0)}% then give ${(spec.give * 100).toFixed(0)}% of peak. no hard take.`
+          }`,
+          { mint: coin.mint, symbol: coin.symbol },
+        );
+        if (lane === "hatch") {
+          set((s) =>
+            s.rival
+              ? {
+                  rival: {
+                    ...s.rival,
+                    cash: s.rival.cash - debit,
+                    feesPaid: (s.rival.feesPaid ?? 0) + feeUsd,
+                    positions: [pos, ...s.rival.positions],
+                    lastBuyAt: now,
+                  },
+                }
+              : {},
+          );
+        } else if (lane === "cub") {
+          set((s) =>
+            s.extra
+              ? {
+                  extra: {
+                    ...s.extra,
+                    cash: s.extra.cash - debit,
+                    feesPaid: (s.extra.feesPaid ?? 0) + feeUsd,
+                    positions: [pos, ...s.extra.positions],
+                    lastBuyAt: now,
+                  },
+                }
+              : {},
+          );
+        } else {
+          set((s) => ({
+            cash: s.cash - debit,
+            feesPaid: (s.feesPaid ?? 0) + feeUsd,
+            positions: [pos, ...s.positions],
+            lastBuyAt: now,
+          }));
+        }
+        log(
+          "SNIPER",
+          "buy",
+          `${who} · HOT fill $${coin.symbol} ${fillUsd.toFixed(2)} usd · score ${score}. wallet spent.`,
+          { mint: coin.mint, symbol: coin.symbol },
+        );
+      }
+
+      async function fireLive(lane: LaneId, coin: PumpCoin, score: number): Promise<boolean> {
         const mint = coin.mint;
         const symbol = coin.symbol;
+        const skip = (reason: string, hushKey?: string, hushMs = 20_000) => {
+          if (hushKey && hush(hushKey, hushMs)) return;
+          const line = `LIVE skip · ${reason}`;
+          log("TILL", "sys", line, { mint, symbol });
+          set({ lastHotLine: line.slice(0, 80) });
+        };
+        if (isEvmMint(mint) && !ponsCurveLive(coin)) {
+          skip(`$${symbol} no live ETH router. skipped.`);
+          return false;
+        }
         const quiet = hotLiveBlock(coin, Date.now(), score);
         if (quiet) {
-          if (!hush(`live:quiet:${mint}`, 45_000)) {
-            log("TILL", "sys", quiet, { mint, symbol });
-          }
-          return;
+          skip(quiet.replace(/^live skip \$[^ ]+ — /, ""), `live:quiet:${mint}`);
+          return false;
         }
         if (punchedQuiet(coin, Date.now(), score)) {
           log(
@@ -617,98 +724,202 @@ export const useTrench = create<TrenchState>()(
             { mint, symbol },
           );
         }
-        const chain: "sol" | "robinhood" =
-          isEvmMint(mint) || get().tapeVenue === "pons" ? "robinhood" : "sol";
+        const chain: "sol" | "robinhood" = isEvmMint(mint) ? "robinhood" : "sol";
         const hatchBook = get().rival?.playbook;
         const cubBook = get().extra?.playbook;
         const book =
           lane === "hatch" && hatchBook ? hatchBook : lane === "cub" && cubBook ? cubBook : get().playbook;
         const floor = liveFloor(book, wxNow(), spiritNow());
-        const spend = () => {
+        const spend = async (): Promise<boolean> => {
           if (!hotAutoArmed() && signOneState() !== "armed") {
-            if (!hush("live:off", 90_000)) {
-              log(
-                "TILL",
-                "sys",
-                `hot is not armed. $${symbol} scored ${score} stays paper.`,
-                { mint, symbol },
-              );
-            }
-            return;
+            skip(`hot is not armed. $${symbol} scored ${score}. no fill.`, "live:off", 30_000);
+            return false;
           }
           if (score < floor) {
+            skip(`$${symbol} score ${score} vs floor ${floor}. no fill.`);
+            return false;
+          }
+          const now = Date.now();
+          const evm = isEvmMint(mint);
+          if (evm) {
+            if (now - ethBurstAt > 8_000) ethBurst = 0;
+            if (ethBurst >= 1) {
+              skip(`burst. $${symbol} scored ${score}. ETH already spent this burst.`, "live:ethburst");
+              return false;
+            }
+            ethBurst += 1;
+            ethBurstAt = now;
+          } else {
+            if (now - liveBurstAt > 8_000) liveBurst = 0;
+            if (liveBurst >= 1) {
+              skip(`burst. $${symbol} scored ${score}. SOL already spent this burst.`, "live:burst");
+              return false;
+            }
+            liveBurst += 1;
+            liveBurstAt = now;
+          }
+          const buy = evm
+            ? await ethHotBuy(mint, symbol)
+            : hotAutoArmed()
+              ? await hotBuy(mint, symbol)
+              : await signOneBuy(mint, symbol);
+          log("TILL", buy.ok ? "till" : "sys", buy.text, { mint, symbol });
+          set({ lastHotLine: buy.text });
+          if (!buy.ok) return false;
+          bookHotPos(lane, coin, score);
+          markLaneLive(lane, mint);
+          pingNtfy(
+            "TRENCHER",
+            `HOT ${evm ? `${LIVE_CAP_ETH} ETH` : `${LIVE_CAP_SOL} SOL`} $${symbol} · ${signOf(lane)}`,
+            true,
+          );
+          return true;
+        };
+        if (!gmgnKey()) return spend();
+        const g = await gmgnLook(mint, chain);
+        markGmgn(symbol, g);
+        if (g.veto) {
+          log("WARDEN", "kill", `LIVE skip · GMGN veto $${symbol} — ${g.veto}`, { mint, symbol });
+          set({ lastHotLine: `LIVE skip · GMGN ${g.veto}`.slice(0, 80) });
+          return false;
+        }
+        if (g.error) {
+          if (!hush("gmgn:dark", 60_000)) {
+            log("WARDEN", "sys", `GMGN dark (${g.error}). live path stays open.`);
+          }
+        } else if (g.line && !hush(`gmgn:${mint}`, 90_000)) {
+          log("WARDEN", "sys", `GMGN clean $${symbol}. ${g.line}`, { mint, symbol });
+        }
+        return spend();
+      }
+
+      function venueOfMint(mint: string): TapeVenue {
+        return isEvmMint(mint) ? "pons" : "pump";
+      }
+
+      async function huntEthRail(now: number, watching: boolean) {
+        if (watching) return;
+        if (get().tapeVenue === "pons") return;
+        const vetHunting =
+          !get().vetDead &&
+          !get().rentPaid &&
+          (get().status === "alive" || get().status === "survived");
+        if (!vetHunting) return;
+        if (!hotAutoArmed()) {
+          if (!hush("eth:rail:off", 180_000)) {
+            log("TILL", "sys", "LIVE skip · hot is not armed. ETH rail idle. pump tape still hunts.");
+            set({ lastHotLine: "LIVE skip · hot is not armed" });
+          }
+          return;
+        }
+        const eth = peekEthHot();
+        if (!eth.address) {
+          if (!hush("eth:rail:nokey", 180_000)) {
+            log("TILL", "sys", "ETH rail idle. no ETH hot key. paste it in the wallet dock.");
+          }
+          return;
+        }
+        const bal = get().hotEth;
+        if (bal != null && bal < LIVE_CAP_ETH + 0.0004) {
+          if (!hush("eth:rail:dry", 30_000)) {
             log(
               "TILL",
               "sys",
-              `LIVE veto $${symbol} score ${score} vs live floor ${floor} (paper ${paperFloor(book, wxNow(), spiritNow())}). paper only. ${signOf(lane)} holds the wallet.`,
-              { mint, symbol },
+              `LIVE skip · dry. ETH rail ${bal.toFixed(4)} ETH. send at least ${LIVE_ETH_FUND}.`,
             );
-            return;
+            set({ lastHotLine: `LIVE skip · dry ETH ${bal.toFixed(4)}` });
           }
-          const now = Date.now();
-          if (now - liveBurstAt > 15_000) liveBurst = 0;
-          if (liveBurst >= 1) {
-            if (!hush("live:burst", 45_000)) {
-              log(
-                "TILL",
-                "sys",
-                `$${symbol} scored ${score} ≥ live ${floor}. live already spent this burst. paper.`,
-                { mint, symbol },
-              );
-            }
-            return;
-          }
-          liveBurst += 1;
-          liveBurstAt = now;
-          if (isEvmMint(mint) || get().tapeVenue === "pons") {
-            void ethHotBuy(mint, symbol).then((r) => {
-              log("TILL", r.ok ? "till" : "sys", r.text, { mint, symbol });
-              set({ lastHotLine: r.text });
-              if (r.ok) {
-                pingNtfy("TRENCHER", `HOT 0.001 ETH $${symbol} · ${signOf(lane)}`, true);
-                markLaneLive(lane, mint);
-              }
-            });
-            return;
-          }
-          if (hotAutoArmed()) {
-            void hotBuy(mint, symbol).then((r) => {
-              log("TILL", r.ok ? "till" : "sys", r.text, { mint, symbol });
-              set({ lastHotLine: r.text });
-              if (r.ok) {
-                pingNtfy("TRENCHER", `HOT 0.02 SOL $${symbol} · ${signOf(lane)}`, true);
-                markLaneLive(lane, mint);
-              }
-            });
-            return;
-          }
-          void signOneBuy(mint, symbol).then((r) => {
-            log("TILL", r.ok ? "till" : "sys", r.text, { mint, symbol });
-            if (r.ok) {
-              pingNtfy("TRENCHER", `SIGNED 0.02 SOL $${symbol} · ${signOf(lane)}`, true);
-              markLaneLive(lane, mint);
-            }
-          });
-        };
-        if (!gmgnKey()) {
-          spend();
           return;
         }
-        void gmgnLook(mint, chain).then((g) => {
-          markGmgn(symbol, g);
-          if (g.veto) {
-            log("WARDEN", "kill", `veto live $${symbol} — ${g.veto}`, { mint, symbol });
-            return;
+        let pons: Awaited<ReturnType<typeof fetchPonsTape>>;
+        try {
+          pons = await fetchPonsTape();
+        } catch (e) {
+          if (!hush("eth:rail:dark", 60_000)) {
+            log("SCOUT", "sys", `ETH rail dark (${e instanceof Error ? e.message : "fetch"}).`);
           }
-          if (g.error) {
-            if (!hush("gmgn:dark", 60_000)) {
-              log("WARDEN", "sys", `GMGN dark (${g.error}). live path stays open.`);
-            }
-          } else if (g.line && !hush(`gmgn:${mint}`, 90_000)) {
-            log("WARDEN", "sys", `GMGN clean $${symbol}. ${g.line}`, { mint, symbol });
+          return;
+        }
+        if (!pons.ok) {
+          if (!hush("eth:rail:dark", 60_000)) {
+            log("SCOUT", "sys", `ETH rail dark (${pons.error}). pump tape holds.`);
           }
-          spend();
-        });
+          return;
+        }
+        const board = [...pons.newest, ...pons.traded];
+        set({ heatPons: tapeHeat(board, "pons", now) });
+        const ponsMap = new Map(board.map((c) => [c.mint.toLowerCase(), c]));
+        const markEvm = (p: Position): Position => {
+          if (!isEvmMint(p.mint)) return p;
+          const hit = ponsMap.get(p.mint.toLowerCase());
+          if (!hit || !(hit.usdMcap > 0)) return p;
+          return {
+            ...p,
+            lastMcap: hit.usdMcap,
+            peakMcap: Math.max(p.peakMcap, hit.usdMcap, hit.athMcap || 0),
+          };
+        };
+        set((s) => ({
+          positions: s.positions.map(markEvm),
+          rival: s.rival ? { ...s.rival, positions: s.rival.positions.map(markEvm) } : s.rival,
+          extra: s.extra ? { ...s.extra, positions: s.extra.positions.map(markEvm) } : s.extra,
+        }));
+        for (const p of [...get().positions]) {
+          if (!isEvmMint(p.mint)) continue;
+          const reason = decideSell(p, now, get().playbook, "pons", wxNow());
+          if (reason) paperExit("vet", p, reason, now);
+        }
+        if (get().positions.some((p) => isEvmMint(p.mint))) {
+          if (!hush("eth:rail:held", 90_000)) {
+            log("SNIPER", "sys", "ETH rail holding a curve. one live ETH bag.");
+          }
+          return;
+        }
+        if (now - lastEthBuyAt < BUY_COOLDOWN_PONS_MS) return;
+        const curves = board.filter(ponsCurveLive);
+        if (!curves.length) {
+          if (!hush("eth:rail:empty", 90_000)) {
+            log("SCOUT", "sys", "ETH rail · no Pons V2 curves. hood.fun / pools.trade stay paper.");
+          }
+          return;
+        }
+        if (!hush("eth:rail:hunt", 45_000)) {
+          log("SCOUT", "scan", `ETH rail · ${curves.length} Pons V2. live ETH hunting. pump tape stays.`);
+        }
+        const st0 = get();
+        const occupied = occupiedMints(st0);
+        const tickers = occupiedTickers(st0);
+        const pool = ponsWake(
+          curves.filter((c) => !occupied.has(c.mint)),
+          curves,
+          new Set(st0.seen),
+          occupied,
+          st0.kills ?? [],
+          ponsTried,
+          "pons",
+        );
+        const inspect = pool.slice(0, 4);
+        for (const coin of inspect) {
+          const st = get();
+          if (st.positions.some((p) => isEvmMint(p.mint))) break;
+          if (occupiedMints(st).has(coin.mint)) continue;
+          if (occupiedTickers(st).has(coin.symbol.toLowerCase()) || tickers.has(coin.symbol.toLowerCase())) {
+            continue;
+          }
+          if (st.playbook.bannedCreators.includes(coin.creator) && !onParole(st.playbook, coin.creator)) {
+            continue;
+          }
+          const cheap = cheapKill(coin, now);
+          if (cheap) continue;
+          const miss = setupMatch(coin, st.meta, now);
+          if (miss) continue;
+          const scored = scoreSetup(coin, st.meta, now, st.playbook);
+          const floor = liveFloor(st.playbook, wxNow(), spiritNow());
+          if (scored.score < floor) continue;
+          const landed = await fireLive("vet", coin, scored.score);
+          if (landed) lastEthBuyAt = now;
+          break;
+        }
       }
 
       function fireLiveSell(p: { mint: string; symbol: string; live?: boolean }) {
@@ -1026,11 +1237,48 @@ export const useTrench = create<TrenchState>()(
             callsign: b.callsign,
           });
           const champ = list[0];
+          const nextCell = (s.round ?? 1) + 1;
+          const due = gateUsd(nextCell);
+          if (s.soloDesk) {
+            const vetCash = champ?.cash ?? STARTING_CASH;
+            const vetPlay = champ?.playbook ?? climbPlaybook(s.playbook);
+            const vetSign = champ?.callsign || mintCallsign();
+            set({
+              status: "alive",
+              vetDead: false,
+              cash: champ ? champ.cash : STARTING_CASH,
+              positions: champ ? champ.positions : [],
+              closed: champ ? champ.closed : [],
+              playbook: vetPlay,
+              lessons: champ ? champ.lessons : s.lessons,
+              feesPaid: champ ? champ.feesPaid : 0,
+              lastBuyAt: champ ? champ.lastBuyAt : 0,
+              rentPaid: false,
+              diedAt: null,
+              callsign: vetSign,
+              rival: null,
+              extra: null,
+              focus: "vet",
+              housePot: 0,
+              roundStartedAt: now,
+              round: nextCell,
+              house: {
+                ...(s.house ?? blankHouse()),
+                playbook: vetPlay,
+              },
+            });
+            log(
+              "META",
+              "sys",
+              `cell ${nextCell}. solo desk. ${vetSign} ${vetCash.toFixed(2)}. the gate is ${due}. Warden floor ${vetPlay.scoreFloor}. no twins.`,
+            );
+            log("TILL", "till", `solo. hunter keeps the chair. pot ${pot.toFixed(2)} folded in.`);
+            pingNtfy("TRENCHER", `cell ${nextCell} solo. ${vetSign}`, true);
+            return;
+          }
           const hatchSnap = list[1];
           const cubSnap = list[2];
           const kept = list.map((x) => x.callsign);
-          const nextCell = (s.round ?? 1) + 1;
-          const due = gateUsd(nextCell);
           const hatchBody = hatchSnap ? toRival(hatchSnap) : spiritBody(-6, kept, nextCell);
           const cubBody = cubSnap ? toRival(cubSnap) : spiritBody(-12, [...kept, hatchBody.callsign], nextCell);
           const vetCash = champ?.cash ?? STARTING_CASH;
@@ -1083,6 +1331,54 @@ export const useTrench = create<TrenchState>()(
         if (s.status === "watch" || s.status === "idle") return;
         const live = hunters();
         const bye = resters();
+        if (s.soloDesk) {
+          if (live.length === 0) {
+            if (bye.length) {
+              log("META", "sys", `solo sat the gate. ${signOf(bye[0])} takes the next cell.`);
+              nextRound(bye[0]);
+              return;
+            }
+            const nextCell = (s.round ?? 1) + 1;
+            const now2 = Date.now();
+            const a = mintCallsign();
+            const book = heatPlaybook(
+              canonHasBlood(useSpirit.getState().canon)
+                ? canonToPlaybook(useSpirit.getState().canon)
+                : s.playbook,
+              nextCell,
+            );
+            set({
+              status: "alive",
+              vetDead: false,
+              cash: STARTING_CASH,
+              positions: [],
+              closed: [],
+              dayHits: [],
+              rentPaid: false,
+              lastBuyAt: 0,
+              diedAt: null,
+              callsign: a,
+              playbook: book,
+              rival: null,
+              extra: null,
+              focus: "vet",
+              roundStartedAt: now2,
+              round: nextCell,
+            });
+            log(
+              "META",
+              "sys",
+              `cell empty. solo ${a}. ${STARTING_CASH.toFixed(0)} usd. the gate is ${gateUsd(nextCell)}. floor ${book.scoreFloor}.`,
+            );
+            return;
+          }
+          const start = s.roundStartedAt ?? s.startedAt;
+          if (start && now - start >= ROUND_MS) {
+            log("TILL", "till", `168h solo. ${signOf(live[0].id)} keeps the chair.`);
+            nextRound(live[0].id);
+          }
+          return;
+        }
         if (live.length === 1) {
           log(
             "META",
@@ -1172,7 +1468,8 @@ export const useTrench = create<TrenchState>()(
           (a, b) => b.closedAt - a.closedAt,
         );
         const batch = takeWindow(closed, now);
-        if (batch.length < 6) return;
+        const hotN = batch.filter(isHotFill).length;
+        if (batch.length < (hotN >= 4 ? 4 : 6)) return;
         const heat = venue === "pons" ? s.heatPons : s.heatPump;
         const other = venue === "pons" ? s.heatPump : s.heatPons;
         const nowP = windowPrint(batch, heat, venue);
@@ -1180,8 +1477,14 @@ export const useTrench = create<TrenchState>()(
         const prior = prev.print ?? emptyPrint(venue);
         const first = !prev.print;
         const flags = regimeShift(prior, nowP, other);
+        const peakMove = (() => {
+          const t = peakArmTarget(nowP, venue);
+          if (t == null) return false;
+          const cur = venue === "pons" ? prev.trailArm : prev.trailArmPump;
+          return Math.abs(t - cur) >= 0.02;
+        })();
         const need = first ? 1 : 2;
-        if (flags.length < need) {
+        if (flags.length < need && !peakMove) {
           if (!prev.print) set({ weather: { ...prev, print: nowP } });
           return;
         }
@@ -1199,7 +1502,7 @@ export const useTrench = create<TrenchState>()(
         log(
           "META",
           "meta",
-          `${src} · ${batch.length} ${nowP.source === "hot" ? "live" : "paper"} · green back ${(nowP.modestGavePct * 100).toFixed(0)}% · ${next.line}`,
+          `${src} · ${batch.length} ${nowP.source === "hot" ? "live" : "paper"} · peak +${Math.round((nowP.medianPeak || 0) * 100)}% · arm +${Math.round(trailSpec(venue, next).arm * 100)} · ${next.line}`,
         );
         if (next.venue !== "stay" && next.venue !== venue) {
           log(
@@ -1410,6 +1713,7 @@ export const useTrench = create<TrenchState>()(
       function fillEmptyChairs() {
         const s = get();
         if (s.status === "watch" || s.status === "idle") return;
+        if (s.soloDesk) return;
         if (hunters().length < 2) return;
         if (s.vetDead || s.status === "dead") {
           const b = spiritBody(-6, takenSigns(), s.round || 1);
@@ -1564,7 +1868,7 @@ export const useTrench = create<TrenchState>()(
             "SCOUT",
             "sys",
             next === "pons"
-              ? "tape flipped to Pons on Robinhood Chain. paper ETH. SOL hot parked."
+              ? "tape flipped to Robinhood Chain. Pons + hood.fun + pools. paper ETH. SOL hot parked."
               : "tape flipped to pump.fun. SOL hot is live again.",
           );
         },
@@ -1718,6 +2022,10 @@ export const useTrench = create<TrenchState>()(
 
         spawnRival: () => {
           const s = get();
+          if (s.soloDesk) {
+            log("META", "sys", "solo desk. one hunter. flip solo off to wake twins.");
+            return;
+          }
           const vetLive = !s.vetDead && (s.status === "alive" || s.status === "survived");
           const hatchLive = hatchOn(s.rival);
           const cubLive = liveBody(s.extra);
@@ -1762,6 +2070,44 @@ export const useTrench = create<TrenchState>()(
             return;
           }
           log("META", "sys", "cell is full. three bodies. cull if you want a chair.");
+        },
+
+        setSoloDesk: (on: boolean) => {
+          const s = get();
+          if (on === !!s.soloDesk && (!on || (!s.rival && !s.extra))) {
+            if (on !== !!s.soloDesk) set({ soloDesk: on });
+            return;
+          }
+          if (!on) {
+            set({ soloDesk: false });
+            log("META", "sys", "twins allowed. wake a body when you want chairs.");
+            return;
+          }
+          let pot = s.housePot ?? 0;
+          if (s.rival) {
+            const leftover = equityOf(s.rival.cash, s.rival.positions);
+            if (leftover > 0) pot += leftover;
+          }
+          if (s.extra) {
+            const leftover = equityOf(s.extra.cash, s.extra.positions);
+            if (leftover > 0) pot += leftover;
+          }
+          const names = [s.rival?.callsign, s.extra?.callsign].filter(Boolean).join(" · ");
+          set({
+            soloDesk: true,
+            rival: null,
+            extra: null,
+            housePot: pot,
+            focus: "vet",
+          });
+          log(
+            "META",
+            "sys",
+            names
+              ? `solo desk. parked ${names}. leftover → pot ${pot.toFixed(2)}. ${s.callsign || "hunter"} keeps the chair.`
+              : `solo desk. ${s.callsign || "hunter"} hunts alone. spirit stays.`,
+          );
+          log("TILL", "till", "one live seat. paper twins off.");
         },
 
         cull: () => {
@@ -1923,7 +2269,7 @@ export const useTrench = create<TrenchState>()(
             return;
           }
           flatteningBags = true;
-          log("TILL", "till", "flattening leftover bags in the hot wallet. paper desk stays put.");
+          log("TILL", "till", "flattening leftover bags in the hot wallet.");
           try {
             const r = await flattenHotBags();
             if (!r.n) {
@@ -1952,6 +2298,15 @@ export const useTrench = create<TrenchState>()(
           const s0 = get();
           if (s0.ticking) return;
           const watching = s0.status === "watch";
+          if (!watching && !hush("hot:only", 300_000)) {
+            log("TILL", "sys", "paper fills off. only HOT wallet spends. no clip without a send.");
+            const liveBag = (p: Position) => !!(p.live || isLiveMint(p.mint));
+            set((s) => ({
+              positions: s.positions.filter(liveBag),
+              rival: s.rival ? { ...s.rival, positions: s.rival.positions.filter(liveBag) } : s.rival,
+              extra: s.extra ? { ...s.extra, positions: s.extra.positions.filter(liveBag) } : s.extra,
+            }));
+          }
           const vetOn = !s0.vetDead && (s0.status === "alive" || s0.status === "survived");
           const hatchLive = hatchOn(s0.rival);
           const cubLive = liveBody(s0.extra);
@@ -2002,31 +2357,51 @@ export const useTrench = create<TrenchState>()(
           }
           set({ ticking: true });
           try {
-            void refreshHot().then((h) => {
-              const prev = get().hotSol;
-              set({ hotPubkey: h.pubkey, hotSol: h.sol });
-              if (h.sol != null && prev != null && Math.abs(h.sol - prev) >= 0.001) {
-                log("TILL", "till", `hot wallet ${h.sol.toFixed(3)} SOL.`);
-              }
-            });
-            void refreshEthHot().then((h) => {
-              const prev = get().hotEth;
-              set({ hotEthAddr: h.address, hotEth: h.eth });
-              if (h.eth != null && prev != null && Math.abs(h.eth - prev) >= 0.0001) {
-                log("TILL", "till", `ETH hot ${h.eth.toFixed(4)} ETH.`);
-              }
-            });
+            if (Date.now() - lastHotBalAt > 30_000) {
+              lastHotBalAt = Date.now();
+              void refreshHot().then((h) => {
+                const prev = get().hotSol;
+                set({ hotPubkey: h.pubkey, hotSol: h.sol });
+                if (h.sol != null && prev != null && Math.abs(h.sol - prev) >= 0.001) {
+                  log("TILL", "till", `hot wallet ${h.sol.toFixed(3)} SOL.`);
+                }
+              });
+              void refreshEthHot().then((h) => {
+                const prev = get().hotEth;
+                set({ hotEthAddr: h.address, hotEth: h.eth });
+                if (h.eth != null && prev != null && Math.abs(h.eth - prev) >= 0.0001) {
+                  log("TILL", "till", `ETH hot ${h.eth.toFixed(4)} ETH.`);
+                }
+              });
+            }
             const tape = get().tapeVenue === "pons" ? await fetchPonsTape() : await fetchTape();
             if (!tape.ok) {
               set({ tapeError: tape.error, lastCycleAt: Date.now() });
-              log("SCOUT", "sys", `tape is dark (${tape.error}).`);
-              applyGrades(get().tape, {}, Date.now());
-              return;
+              const board = get().tape;
+              if (!hush("scout:dark", 60_000)) {
+                log(
+                  "SCOUT",
+                  "sys",
+                  board.length
+                    ? `tape is dark (${tape.error}). hunting last board.`
+                    : `tape is dark (${tape.error}).`,
+                );
+              }
+              if (board.length && gmgnKey()) {
+                /* fall through — GMGN can still feed the wire */
+              } else {
+                applyGrades(board, {}, Date.now());
+                return;
+              }
             }
-            set({ tapeError: null, solUsd: tape.solUsd, lastCycleAt: Date.now() });
+            if (tape.ok) {
+              set({ tapeError: null, solUsd: tape.solUsd, lastCycleAt: Date.now() });
+            } else {
+              set({ lastCycleAt: Date.now() });
+            }
 
             const now = Date.now();
-            const incoming = [...tape.newest, ...tape.traded];
+            const incoming = tape.ok ? [...tape.newest, ...tape.traded] : [...get().tape];
             const byMint = new Map<string, PumpCoin>();
             for (const c of incoming) byMint.set(c.mint, c);
             const known = new Set(get().seen);
@@ -2132,7 +2507,7 @@ export const useTrench = create<TrenchState>()(
                       : null;
               if (!pack) return;
               for (const p of [...pack.list]) {
-                const reason = decideSell(p, now, pack.book, venueNow, wxNow());
+                const reason = decideSell(p, now, pack.book, venueOfMint(p.mint), wxNow());
                 if (reason) paperExit(lane, p, reason, now);
               }
             };
@@ -2189,7 +2564,7 @@ export const useTrench = create<TrenchState>()(
               }
             }
             const freshMap = new Map<string, PumpCoin>();
-            for (const c of [...tape.newest, ...gmgnFresh]) {
+            for (const c of [...(tape.ok ? tape.newest : []), ...gmgnFresh]) {
               if (seen.has(c.mint)) continue;
               freshMap.set(c.mint, c);
             }
@@ -2225,7 +2600,7 @@ export const useTrench = create<TrenchState>()(
             const book = get().playbook;
             const pool = ponsWake(
                     fresh,
-                    tape.traded,
+                    tape.ok ? tape.traded : [],
                     seen,
                     occupiedMints(get()),
                     get().kills ?? [],
@@ -2346,94 +2721,7 @@ export const useTrench = create<TrenchState>()(
                 continue;
               }
 
-              const intended = sizeByScore(st.cash, st.solUsd, scored.score, st.tapeVenue, wxNow());
-              if (intended < minClip(st.tapeVenue)) {
-                if (!hush("cash:vet", 90_000)) {
-                  log("SNIPER", "sys", "size under 4 usd against the risk cap. waiting on cash.");
-                }
-                leftover.push(coin);
-                continue;
-              }
-
-              const slipPct = paperSlip(coin.usdMcap);
-              const fillUsd = Math.round(intended * (1 + slipPct) * 100) / 100;
-              const feeUsd = paperFee(fillUsd);
-              const debit = fillUsd + feeUsd;
-              if (st.cash < debit) {
-                log("TILL", "till", `$${coin.symbol} fill plus fee is ${debit.toFixed(2)}. not enough cash.`);
-                leftover.push(coin);
-                continue;
-              }
-
-              const mcap = Math.max(coin.usdMcap, 1);
-              const pos: Position = {
-                mint: coin.mint,
-                name: coin.name,
-                symbol: coin.symbol,
-                image: coin.image,
-                creator: coin.creator,
-                costUsd: fillUsd,
-                entryMcap: mcap,
-                peakMcap: mcap,
-                lastMcap: mcap,
-                openedAt: now,
-                score: scored.score,
-                stopPct: clipStop(st.playbook, st.tapeVenue),
-                takePct: st.playbook.takePct,
-                intendedUsd: intended,
-                slipPct,
-                feeUsd,
-                metaSource: st.meta.source,
-                metaHits: matchedMetaTokens(coin, st.meta),
-              };
-
-              log(
-                "RISK",
-                "sys",
-                `exit written $${coin.symbol}: stop ${(clipStop(st.playbook, st.tapeVenue) * 100).toFixed(0)}% / ${
-                  (() => {
-                    const spec = trailSpec(st.tapeVenue, wxNow());
-                    return st.tapeVenue === "pons"
-                      ? `hard +${((spec.hard ?? HARD_TAKE_PONS) * 100).toFixed(0)}% / trail +${(spec.arm * 100).toFixed(0)}% then give ${(spec.give * 100).toFixed(0)}% of peak.`
-                      : `trail arms +${(spec.arm * 100).toFixed(0)}% then give ${(spec.give * 100).toFixed(0)}% of peak. no hard take.`;
-                  })()
-                }`,
-                { mint: coin.mint, symbol: coin.symbol },
-              );
-              set((s) => ({
-                cash: s.cash - debit,
-                feesPaid: (s.feesPaid ?? 0) + feeUsd,
-                positions: [pos, ...s.positions],
-                lastBuyAt: now,
-              }));
-              log(
-                "SNIPER",
-                "buy",
-                `fill $${coin.symbol} ${fillUsd.toFixed(2)} usd · score ${scored.score} · ${scored.why}. never averaging down.`,
-                { mint: coin.mint, symbol: coin.symbol },
-              );
-              log(
-                "SNIPER",
-                "sys",
-                `slippage $${coin.symbol} ${(slipPct * 100).toFixed(1)}% on a ${Math.round(coin.usdMcap)} curve.`,
-                { mint: coin.mint, symbol: coin.symbol },
-              );
-              log(
-                "TILL",
-                "till",
-                `fee $${coin.symbol} ${feeUsd.toFixed(2)} usd. logged separate from the fill.`,
-                { mint: coin.mint, symbol: coin.symbol },
-              );
-              const shadow = shadowQuote(fillUsd, st.solUsd);
-              log(
-                "TILL",
-                "sys",
-                st.tapeVenue === "pons" || isEvmMint(coin.mint)
-                  ? `PONS paper $${coin.symbol} ${fillUsd.toFixed(2)} usd. ETH hot 0.001 if armed.`
-                  : `SHADOW · ${vetTag()} would spend ${shadow.sol.toFixed(3)} SOL ($${shadow.usd.toFixed(2)}) on $${coin.symbol} · cap ${LIVE_CAP_SOL}.`,
-                { mint: coin.mint, symbol: coin.symbol },
-              );
-              fireLive("vet", coin, scored.score);
+              await fireLive("vet", coin, scored.score);
             }
 
             if (hatchOn(get().rival)) {
@@ -2492,90 +2780,7 @@ export const useTrench = create<TrenchState>()(
                   }
                   continue;
                 }
-                const intended = sizeByScore(r2.cash, st.solUsd, scored.score, st.tapeVenue, wxNow());
-                if (intended < minClip(st.tapeVenue)) {
-                  if (!hush("cash:hatch", 90_000)) {
-                    log("SNIPER", "sys", `${hatchTag()} · size under 4 usd. waiting on cash.`);
-                  }
-                  continue;
-                }
-                const slipPct = paperSlip(coin.usdMcap);
-                const fillUsd = Math.round(intended * (1 + slipPct) * 100) / 100;
-                const feeUsd = paperFee(fillUsd);
-                const debit = fillUsd + feeUsd;
-                if (r2.cash < debit) {
-                  log("TILL", "till", `${hatchTag()} · $${coin.symbol} fill plus fee is ${debit.toFixed(2)}. not enough cash.`);
-                  continue;
-                }
-                const mcap = Math.max(coin.usdMcap, 1);
-                const pos: Position = {
-                  mint: coin.mint,
-                  name: coin.name,
-                  symbol: coin.symbol,
-                  image: coin.image,
-                  creator: coin.creator,
-                  costUsd: fillUsd,
-                  entryMcap: mcap,
-                  peakMcap: mcap,
-                  lastMcap: mcap,
-                  openedAt: now,
-                  score: scored.score,
-                  stopPct: clipStop(r.playbook, st.tapeVenue),
-                  takePct: r.playbook.takePct,
-                  intendedUsd: intended,
-                  slipPct,
-                  feeUsd,
-                  metaSource: st.meta.source,
-                  metaHits: matchedMetaTokens(coin, st.meta),
-                };
-                log(
-                  "RISK",
-                  "sys",
-                  `${hatchTag()} · exit written $${coin.symbol}: stop ${(clipStop(r.playbook, st.tapeVenue) * 100).toFixed(0)}% / ${
-                    (() => {
-                      const spec = trailSpec(st.tapeVenue, wxNow());
-                      return st.tapeVenue === "pons"
-                        ? `hard +${((spec.hard ?? HARD_TAKE_PONS) * 100).toFixed(0)}% / trail +${(spec.arm * 100).toFixed(0)}%/−${(spec.give * 100).toFixed(0)}% peak.`
-                        : `trail +${(spec.arm * 100).toFixed(0)}% / −${(spec.give * 100).toFixed(0)}% peak.`;
-                    })()
-                  }`,
-                  { mint: coin.mint, symbol: coin.symbol },
-                );
-                set((s) =>
-                  s.rival
-                    ? {
-                        rival: {
-                          ...s.rival,
-                          cash: s.rival.cash - debit,
-                          feesPaid: (s.rival.feesPaid ?? 0) + feeUsd,
-                          positions: [pos, ...s.rival.positions],
-                          lastBuyAt: now,
-                        },
-                      }
-                    : {},
-                );
-                log(
-                  "SNIPER",
-                  "buy",
-                  `${hatchTag()} · fill $${coin.symbol} ${fillUsd.toFixed(2)} usd · score ${scored.score} · ${scored.why}.`,
-                  { mint: coin.mint, symbol: coin.symbol },
-                );
-                const shadow = shadowQuote(fillUsd, st.solUsd);
-                log(
-                  "TILL",
-                  "sys",
-                  st.tapeVenue === "pons" || isEvmMint(coin.mint)
-                    ? `PONS paper $${coin.symbol} ${fillUsd.toFixed(2)} usd. ETH hot 0.001 if armed.`
-                    : `SHADOW · ${hatchTag()} would spend ${shadow.sol.toFixed(3)} SOL ($${shadow.usd.toFixed(2)}) on $${coin.symbol} · cap ${LIVE_CAP_SOL} · wallet does not sign.`,
-                  { mint: coin.mint, symbol: coin.symbol },
-                );
-                fireLive("hatch", coin, scored.score);
-                log(
-                  "TILL",
-                  "till",
-                  `${hatchTag()} · fee $${coin.symbol} ${feeUsd.toFixed(2)} usd.`,
-                  { mint: coin.mint, symbol: coin.symbol },
-                );
+                await fireLive("hatch", coin, scored.score);
               }
             }
 
@@ -2623,77 +2828,11 @@ export const useTrench = create<TrenchState>()(
                   }
                   continue;
                 }
-                const intended = sizeByScore(c2.cash, st.solUsd, scored.score, st.tapeVenue, wxNow());
-                if (intended < minClip(st.tapeVenue)) {
-                  if (!hush("cash:cub", 90_000)) {
-                    log("SNIPER", "sys", `${cubTag()} · size under 4 usd. waiting on cash.`);
-                  }
-                  continue;
-                }
-                const slipPct = paperSlip(coin.usdMcap);
-                const fillUsd = Math.round(intended * (1 + slipPct) * 100) / 100;
-                const feeUsd = paperFee(fillUsd);
-                const debit = fillUsd + feeUsd;
-                if (c2.cash < debit) {
-                  log("TILL", "till", `${cubTag()} · $${coin.symbol} fill plus fee is ${debit.toFixed(2)}. not enough cash.`);
-                  continue;
-                }
-                const mcap = Math.max(coin.usdMcap, 1);
-                const pos: Position = {
-                  mint: coin.mint,
-                  name: coin.name,
-                  symbol: coin.symbol,
-                  image: coin.image,
-                  creator: coin.creator,
-                  costUsd: fillUsd,
-                  entryMcap: mcap,
-                  peakMcap: mcap,
-                  lastMcap: mcap,
-                  openedAt: now,
-                  score: scored.score,
-                  stopPct: clipStop(r.playbook, st.tapeVenue),
-                  takePct: r.playbook.takePct,
-                  intendedUsd: intended,
-                  slipPct,
-                  feeUsd,
-                  metaSource: st.meta.source,
-                  metaHits: matchedMetaTokens(coin, st.meta),
-                };
-                log(
-                  "RISK",
-                  "sys",
-                  `${cubTag()} · exit written $${coin.symbol}: stop ${(clipStop(r.playbook, st.tapeVenue) * 100).toFixed(0)}% / ${
-                    (() => {
-                      const spec = trailSpec(st.tapeVenue, wxNow());
-                      return st.tapeVenue === "pons"
-                        ? `hard +${((spec.hard ?? HARD_TAKE_PONS) * 100).toFixed(0)}% / trail +${(spec.arm * 100).toFixed(0)}%/−${(spec.give * 100).toFixed(0)}% peak.`
-                        : `trail +${(spec.arm * 100).toFixed(0)}% / −${(spec.give * 100).toFixed(0)}% peak.`;
-                    })()
-                  }`,
-                  { mint: coin.mint, symbol: coin.symbol },
-                );
-                set((s) =>
-                  s.extra
-                    ? {
-                        extra: {
-                          ...s.extra,
-                          cash: s.extra.cash - debit,
-                          feesPaid: (s.extra.feesPaid ?? 0) + feeUsd,
-                          positions: [pos, ...s.extra.positions],
-                          lastBuyAt: now,
-                        },
-                      }
-                    : {},
-                );
-                log(
-                  "SNIPER",
-                  "buy",
-                  `${cubTag()} · fill $${coin.symbol} ${fillUsd.toFixed(2)} usd · score ${scored.score} · ${scored.why}.`,
-                  { mint: coin.mint, symbol: coin.symbol },
-                );
-                fireLive("cub", coin, scored.score);
+                await fireLive("cub", coin, scored.score);
               }
             }
+
+            await huntEthRail(now, watching);
 
             set({ seen: Array.from(seen).slice(-400), creatorSeen: creatorLocal });
 
@@ -2742,7 +2881,7 @@ export const useTrench = create<TrenchState>()(
 
               const after = get();
               for (const p of after.positions) {
-                const reason = decideSell(p, now, after.playbook, after.tapeVenue, wxNow());
+                const reason = decideSell(p, now, after.playbook, venueOfMint(p.mint), wxNow());
                 if (reason) paperExit("vet", p, reason, now);
               }
             }
@@ -2766,7 +2905,7 @@ export const useTrench = create<TrenchState>()(
                   for (const p of [...after.positions]) {
                     const rNow = get().rival;
                     if (!rNow) break;
-                    const reason = decideSell(p, now, rNow.playbook, get().tapeVenue, wxNow());
+                    const reason = decideSell(p, now, rNow.playbook, venueOfMint(p.mint), wxNow());
                     if (reason) paperExit("hatch", p, reason, now);
                   }
                 }
@@ -2792,7 +2931,7 @@ export const useTrench = create<TrenchState>()(
                   for (const p of [...after.positions]) {
                     const rNow = get().extra;
                     if (!rNow) break;
-                    const reason = decideSell(p, now, rNow.playbook, get().tapeVenue, wxNow());
+                    const reason = decideSell(p, now, rNow.playbook, venueOfMint(p.mint), wxNow());
                     if (reason) paperExit("cub", p, reason, now);
                   }
                 }
@@ -3216,7 +3355,9 @@ ${tapeHay}`),
           kills: Array.isArray(p.kills) ? p.kills : [],
           lessons: Array.isArray(p.lessons) ? p.lessons : [],
           rival:
-            p.rival && typeof p.rival === "object"
+            p.soloDesk === true
+              ? null
+              : p.rival && typeof p.rival === "object"
               ? {
                   ...(p.rival as Rival),
                   callsign:
@@ -3225,7 +3366,9 @@ ${tapeHay}`),
                 }
               : null,
           extra:
-            p.extra && typeof p.extra === "object"
+            p.soloDesk === true
+              ? null
+              : p.extra && typeof p.extra === "object"
               ? {
                   ...(p.extra as Rival),
                   callsign:
@@ -3236,7 +3379,8 @@ ${tapeHay}`),
                     ]),
                 }
               : null,
-          focus: p.focus === "hatch" || p.focus === "cub" ? p.focus : "vet",
+          soloDesk: p.soloDesk === true,
+          focus: p.soloDesk === true ? "vet" : p.focus === "hatch" || p.focus === "cub" ? p.focus : "vet",
           vetDead: p.vetDead === true,
           housePot: typeof p.housePot === "number" ? p.housePot : 0,
           houseBank: typeof p.houseBank === "number" ? p.houseBank : 0,
@@ -3343,6 +3487,7 @@ ${tapeHay}`),
         house: s.house,
         rival: s.rival,
         extra: s.extra,
+        soloDesk: s.soloDesk === true,
         focus: s.focus,
         vetDead: s.vetDead,
         housePot: s.housePot ?? 0,

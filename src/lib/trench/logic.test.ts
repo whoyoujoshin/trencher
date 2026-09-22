@@ -1,6 +1,6 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { absorbKill, absorbTrade, blankPlaybook, blankScorecard, cheapKill, clipsInDay, coldKeywords, decideSell, emptyPrint, exitMcap, formatLedger, formatWeather, gmgnLine, gmgnVeto, grokTrust, hotLiveBlock, isHotFill, liveFloor, paperFloor, pickHotLane, ponsWake, regimeShift, scarSit, scarStreak, scoreSetup, setupMatch, shouldAskMeta, sizeByScore, stampDayHits, stripColdKeywords, takeWindow, tapeHeat, trailSpec, windowPrint, wilsonLow, wordEdge, wordShouldDrop, writeWeather } from "./logic.ts";
+import { absorbKill, absorbTrade, blankPlaybook, blankScorecard, cheapKill, clipsInDay, coldKeywords, decideSell, emptyPrint, exitMcap, formatLedger, formatWeather, gmgnLine, gmgnVeto, grokTrust, hotLiveBlock, isHotFill, liveFloor, paperFloor, peakArmTarget, pickHotLane, ponsCurveLive, ponsWake, regimeShift, scarSit, scarStreak, scoreSetup, setupMatch, shouldAskMeta, sizeByScore, stampDayHits, stripColdKeywords, takeWindow, tapeHeat, trailSpec, windowPrint, wilsonLow, wordEdge, wordShouldDrop, writeWeather } from "./logic.ts";
 import { blankWeather, stampRail } from "./types.ts";
 import type { ClosedTrade, MetaState, PumpCoin } from "./types.ts";
 import { blankCanon, mergeCanon } from "./canon.ts";
@@ -44,6 +44,29 @@ const open: MetaState = {
 describe("pons retune", () => {
   it("does not cheap-kill a listed Pons pool", () => {
     assert.equal(cheapKill(coin({ complete: true }), Date.now()), null);
+  });
+
+  it("ETH rail only lives on a Pons V2 curve, not hood.fun or pools.trade", () => {
+    const curve = "0x" + "33".repeat(20);
+    assert.equal(ponsCurveLive(coin({ curve, description: "Pons V2 bonding curve" })), true);
+    assert.equal(
+      ponsCurveLive(coin({ curve: "", description: "hood.fun on Robinhood Chain" })),
+      false,
+    );
+    assert.equal(
+      ponsCurveLive(coin({ curve, description: "pools.trade on Robinhood Chain" })),
+      false,
+    );
+    assert.equal(
+      ponsCurveLive(
+        coin({
+          mint: "So1anaMint1111111111111111111111111111111",
+          curve,
+          venue: "pump",
+        }),
+      ),
+      false,
+    );
   });
 
   it("still cheap-kills a completed Pump curve", () => {
@@ -267,12 +290,12 @@ describe("META weather", () => {
     assert.equal(paperFloor(hatch, wx, 72), 47);
   });
 
-  it("live floor sits 4 over paper, never above spirit", () => {
+  it("live floor matches paper so the same thesis can spend", () => {
     const wx = { ...blankWeather(), bar: 53 };
     const book = blankPlaybook();
-    assert.equal(liveFloor(book, wx, 72), 57);
-    assert.equal(liveFloor(book, { ...wx, bar: 70 }, 72), 72);
-    assert.ok(liveFloor(book, wx, 72) < 72);
+    assert.equal(liveFloor(book, wx, 72), paperFloor(book, wx, 72));
+    assert.equal(liveFloor(book, wx, 72), 53);
+    assert.equal(liveFloor(book, { ...wx, bar: 70 }, 72), 70);
   });
 
   it("sizes down on weather 0.7 without breaking the 8 usd cap", () => {
@@ -351,6 +374,35 @@ describe("META weather", () => {
       wx,
     );
     assert.equal(take, "take");
+  });
+
+  it("feeds hot blotter peaks into trail arm and ignores zero-fills", () => {
+    const batch = [
+      close({ rail: "sol", peakPct: 0.32, pnlPct: 0.04, pnlUsd: 0.4, reason: "take" }),
+      close({ rail: "sol", peakPct: 0.28, pnlPct: -0.18, pnlUsd: -2, reason: "stop" }),
+      close({ rail: "sol", peakPct: 0.24, pnlPct: 0.02, pnlUsd: 0.2, reason: "take" }),
+      close({ rail: "sol", peakPct: 0.3, pnlPct: -0.18, pnlUsd: -2, reason: "stop" }),
+      close({ rail: "sol", peakPct: 0, pnlPct: 0, pnlUsd: -0.08, reason: "time" }),
+      close({ rail: "sol", peakPct: 0.02, pnlPct: -0.18, pnlUsd: -2, reason: "stop" }),
+    ];
+    const print = windowPrint(batch, null, "pump");
+    assert.equal(print.peakN, 4);
+    assert.ok(print.medianPeak >= 0.24 && print.medianPeak <= 0.32, `median ${print.medianPeak}`);
+    const target = peakArmTarget(print, "pump");
+    assert.ok(target != null && target <= 0.22, `target ${target}`);
+    const wx = writeWeather(blankWeather(), [], print, 72);
+    assert.ok(wx.trailArmPump <= 0.25, `arm ${wx.trailArmPump}`);
+    assert.ok(wx.trailArmPump >= 0.18);
+  });
+
+  it("does not retune the arm on a pile of never-ran pulse dumps", () => {
+    const batch = Array.from({ length: 6 }, () =>
+      close({ rail: "sol", peakPct: 0.03, pnlPct: 0, reason: "time" }),
+    );
+    const print = windowPrint(batch, null, "pump");
+    assert.equal(peakArmTarget(print, "pump"), null);
+    const wx = writeWeather({ ...blankWeather(), trailArmPump: 0.25 }, [], print, 72);
+    assert.equal(wx.trailArmPump, 0.25);
   });
 
   it("arms the trail at +25% and books a green that covers fees", () => {
@@ -490,6 +542,7 @@ describe("META weather", () => {
       lastTradeAt: now - 90_000,
     });
     assert.ok(hotLiveBlock(quiet, now)?.includes("quiet"));
+    assert.equal(hotLiveBlock(quiet, now, 80), null);
     assert.equal(hotLiveBlock(quiet, now, 84), null);
     assert.ok(hotLiveBlock(quiet, now, 60)?.includes("quiet"));
     const woke = coin({
@@ -499,6 +552,15 @@ describe("META weather", () => {
       lastTradeAt: now - 5_000,
     });
     assert.equal(hotLiveBlock(woke, now), null);
+    const secs = Math.floor(now / 1000) - 4;
+    const unix = coin({
+      venue: "pump",
+      mint: "So1anaMint1111111111111111111111111111111",
+      usdMcap: 64_000,
+      lastTradeAt: secs,
+      createdAt: secs,
+    });
+    assert.equal(hotLiveBlock(unix, now, 50), null);
     const thin = coin({ usdMcap: 1600 });
     assert.ok(hotLiveBlock(thin, now)?.includes("mcap"));
     assert.ok(hotLiveBlock(thin, now, 84)?.includes("mcap"));
@@ -700,8 +762,8 @@ describe("self-teach", () => {
       {
         costUsd: 15,
         entryMcap: 5000,
-        lastMcap: 9500,
-        peakMcap: 9500,
+        lastMcap: 9600,
+        peakMcap: 9600,
         openedAt: now - 20_000,
         stopPct: -0.5,
         takePct: 0.9,

@@ -10,14 +10,27 @@ const RH_RPCS = [
   "https://rpc.mainnet.chain.robinhood.com",
 ];
 const RH_V3_FACTORY = "0x1f7d7550B1b028f7571E69A784071F0205FD2EfA";
+const SUSHI_V3_FACTORY = "0xE51960f1B45f1C9FB6D166E6a884F866fC70433B";
 const PONS_V2_FACTORY = "0x7ed598bcef8bd9edd8c97a195c6d13f40801ec7e";
+const PONS_V1_FACTORY = "0xa5aab3f0c6eeadf30ef1d3eb997108e976351feb";
+const HOOD_LAUNCHER = "0x5e4121c262b846eb518ef3eadcd5566838aa841f";
+const POOLS_TRADE = [
+  "0x23f8209572b4a1c2ad88a42749e830791fb027f1",
+  "0xad44d55e7f8337c3ce113fbb591486e85be104b2",
+  "0x0000ffffbe8efe702c8703ae3477ff5de3d319c0",
+];
 const RH_WETH = "0x0bd7d308f8e1639fab988df18a8011f41eacad73";
 const PONS_USDG = "0x5fc5360d0400a0fd4f2af552add042d716f1d168";
 const POOL_CREATED =
   "0x783cca1c0412dd0d695e784568c96da2e9c22ff989357a2e8b1d9b2b4e6b7118";
 const TOKEN_LAUNCHED =
   "0x8d4aad4953d0ca700d468f3753aa14432d1b35b43ec6409f051fb6aa43a89607";
+const TOKEN_LAUNCHED_V1 =
+  "0xdb51ea9ad51ab453a65a4cb7e60c3cb378c9501bb002609f8f97778fb6c4235a";
+const TOKEN_LAUNCHED_HOOD =
+  "0xddc4160e57e0f9bb97f0a72300d16d7085e659888650ee95da1e92e4fb4b0ff4";
 const PONS_FEE = 10_000;
+const V3_FEES = new Set([500, 2500, 3000, 10_000]);
 const PONS_SUPPLY = 1_000_000_000;
 const NAME_SEL = "0x06fdde03";
 const SYMBOL_SEL = "0x95d89b41";
@@ -28,12 +41,20 @@ const PONS_V2_WINDOWS = 2;
 const PONS_BLOCK_MS = 100;
 const PONS_FRESH_MS = 800;
 const PONS_STALE_MS = 10 * 60_000;
+const PUMP_FRESH_MS = 6_000;
+const PUMP_STALE_MS = 10 * 60_000;
+const PUMP_COOL_MS = 45_000;
 
 const creatorCache = new Map<
   string,
   { at: number; count: number; symbols: string[] }
 >();
 const CREATOR_TTL = 3 * 60_000;
+let pumpCoolUntil = 0;
+let pumpTapeCache: {
+  at: number;
+  tape: { ok: true; newest: PumpCoin[]; traded: PumpCoin[]; solUsd: number };
+} | null = null;
 
 type RawCoin = Record<string, unknown>;
 
@@ -50,6 +71,12 @@ function str(v: unknown): string {
   return typeof v === "string" ? v : "";
 }
 
+function tapeMs(v: unknown): number {
+  const n = num(v);
+  if (n <= 0) return 0;
+  return n < 1e12 ? n * 1000 : n;
+}
+
 function normalize(raw: RawCoin): PumpCoin | null {
   const mint = str(raw.mint);
   if (!mint) return null;
@@ -62,7 +89,7 @@ function normalize(raw: RawCoin): PumpCoin | null {
     description: str(raw.description),
     image: str(raw.image_uri) || str(raw.profile_image) || null,
     creator: str(raw.creator),
-    createdAt: num(raw.created_timestamp),
+    createdAt: tapeMs(raw.created_timestamp),
     usdMcap,
     solMcap,
     replyCount: Math.floor(num(raw.reply_count)),
@@ -74,17 +101,24 @@ function normalize(raw: RawCoin): PumpCoin | null {
     telegram: str(raw.telegram) || null,
     website: str(raw.website) || null,
     username: str(raw.username) || null,
-    lastTradeAt: num(raw.last_trade_timestamp) || null,
+    lastTradeAt: tapeMs(raw.last_trade_timestamp) || null,
     athMcap: num(raw.ath_market_cap) || usdMcap,
     venue: "pump",
   };
 }
 
 async function pumpGet(path: string): Promise<unknown> {
+  if (Date.now() < pumpCoolUntil) throw new Error("pump 429");
   const res = await fetch(`${PUMP}${path}`, {
     headers: { accept: "application/json" },
     signal: AbortSignal.timeout(9000),
   });
+  if (res.status === 429) {
+    const ra = Number(res.headers.get("retry-after"));
+    const wait = Number.isFinite(ra) && ra > 0 ? Math.min(ra * 1000, 120_000) : PUMP_COOL_MS;
+    pumpCoolUntil = Math.max(pumpCoolUntil, Date.now() + wait);
+    throw new Error("pump 429");
+  }
   if (!res.ok) {
     throw new Error(`pump ${res.status}`);
   }
@@ -287,6 +321,8 @@ let ponsCache: { at: number; tape: Extract<PonsTape, { ok: true }> } | null = nu
 let ethUsdMemo = { at: 0, usd: 2400 };
 let ponsHead = 0;
 let lastPonsDexAt = 0;
+let lastGeckoAt = 0;
+type PadKind = "v2" | "v3" | "v1" | "hood" | "pools";
 type PonsLaunch = {
   token: string;
   curve: string;
@@ -295,7 +331,7 @@ type PonsLaunch = {
   pair: string;
   tokenIs0: boolean;
   block: number;
-  kind: "v2" | "v3";
+  kind: PadKind;
 };
 const ponsLaunches = new Map<string, PonsLaunch>();
 const ponsKnown = new Map<string, PumpCoin>();
@@ -351,7 +387,7 @@ async function geckoPons(ethUsd: number, anyQuote = false): Promise<PumpCoin[]> 
     const quoteAddr = (quote?.address ?? "").toLowerCase();
     const baseAddr = (base?.address ?? "").toLowerCase();
     const token = isQuote(quoteAddr) ? base : isQuote(baseAddr) ? quote : anyQuote ? base : null;
-    if (!anyQuote && quoteAddr !== RH_WETH && baseAddr !== RH_WETH) continue;
+    if (!anyQuote && !isQuote(quoteAddr) && !isQuote(baseAddr)) continue;
     const mint = (token?.address ?? "").toLowerCase();
     if (!isEvmMint(mint) || mint === RH_WETH || mint === PONS_USDG) continue;
     const usdMcap = num(pool.attributes?.market_cap_usd) || num(pool.attributes?.fdv_usd);
@@ -361,7 +397,7 @@ async function geckoPons(ethUsd: number, anyQuote = false): Promise<PumpCoin[]> 
       mint,
       name: token?.name || pool.attributes?.name || "unnamed",
       symbol: token?.symbol || "???",
-      description: "Pons launch on Robinhood Chain",
+      description: "Robinhood Chain launch",
       image: token?.image_url ?? null,
       creator: "",
       createdAt: created,
@@ -433,6 +469,25 @@ function mcapFromCurve(quoteUsd: number, remaining: number, supply: number): num
   return Math.round(mcap);
 }
 
+function padLine(kind: PadKind): string {
+  if (kind === "v2") return "Pons V2 bonding curve";
+  if (kind === "v1") return "Pons V1 pool";
+  if (kind === "hood") return "hood.fun on Robinhood Chain";
+  if (kind === "pools") return "pools.trade on Robinhood Chain";
+  return "Robinhood Chain launch";
+}
+
+function padWindows(): { addr: string; topic: string; parse: PadKind }[] {
+  return [
+    { addr: PONS_V2_FACTORY, topic: TOKEN_LAUNCHED, parse: "v2" },
+    { addr: PONS_V1_FACTORY, topic: TOKEN_LAUNCHED_V1, parse: "v1" },
+    { addr: HOOD_LAUNCHER, topic: TOKEN_LAUNCHED_HOOD, parse: "hood" },
+    ...POOLS_TRADE.map((addr) => ({ addr, topic: TOKEN_LAUNCHED_V1, parse: "pools" as const })),
+    { addr: RH_V3_FACTORY, topic: POOL_CREATED, parse: "v3" },
+    { addr: SUSHI_V3_FACTORY, topic: POOL_CREATED, parse: "v3" },
+  ];
+}
+
 function pushLogWindow(
   calls: { method: string; params: unknown[] }[],
   address: string,
@@ -460,6 +515,9 @@ async function loadPonsTape(): Promise<Extract<PonsTape, { ok: true }>> {
   const bn = Number(BigInt(String(bnRaw ?? "0")));
   if (!Number.isFinite(bn) || bn <= 0) throw new Error("rh head dark");
   const logCalls: { method: string; params: unknown[] }[] = [];
+  const pads = padWindows();
+  const fromHot = Math.max(0, ponsHead - 128);
+  const fromCold = Math.max(0, bn - PONS_LOOKBACK + 1);
   if (cold) {
     for (let i = 0; i < PONS_V2_WINDOWS; i++) {
       const to = bn - i * PONS_LOOKBACK;
@@ -467,28 +525,68 @@ async function loadPonsTape(): Promise<Extract<PonsTape, { ok: true }>> {
       if (to <= 0) break;
       pushLogWindow(logCalls, PONS_V2_FACTORY, TOKEN_LAUNCHED, from, to);
     }
-    pushLogWindow(logCalls, RH_V3_FACTORY, POOL_CREATED, bn - PONS_LOOKBACK + 1, bn);
+    for (const pad of pads) {
+      if (pad.addr === PONS_V2_FACTORY) continue;
+      pushLogWindow(logCalls, pad.addr, pad.topic, fromCold, bn);
+    }
   } else {
-    const from = Math.max(0, ponsHead - 128);
-    pushLogWindow(logCalls, PONS_V2_FACTORY, TOKEN_LAUNCHED, from, bn);
-    pushLogWindow(logCalls, RH_V3_FACTORY, POOL_CREATED, from, bn);
+    for (const pad of pads) {
+      pushLogWindow(logCalls, pad.addr, pad.topic, fromHot, bn);
+    }
   }
   const raws = await rhBatch(logCalls);
-  const v2Count = cold ? Math.min(PONS_V2_WINDOWS, logCalls.length - 1) : 1;
-  for (let i = 0; i < v2Count; i++) {
-    const raw = raws[i];
-    if (!Array.isArray(raw)) continue;
-    for (const row of parseTokenLaunched(raw as { topics?: string[]; data?: string; blockNumber?: string }[])) {
-      ponsLaunches.set(row.token, row);
+  const ingest = (rows: PonsLaunch[]) => {
+    for (const row of rows) ponsLaunches.set(row.token, row);
+  };
+  if (cold) {
+    const v2Count = Math.min(PONS_V2_WINDOWS, Math.max(0, logCalls.length - (pads.length - 1)));
+    for (let i = 0; i < v2Count; i++) {
+      const raw = raws[i];
+      if (Array.isArray(raw)) ingest(parseTokenLaunched(raw as { topics?: string[]; data?: string; blockNumber?: string }[]));
     }
-  }
-  const v3Raw = raws[v2Count];
-  if (Array.isArray(v3Raw)) {
-    for (const row of parsePonsLogs(v3Raw as { topics?: string[]; data?: string; blockNumber?: string }[])) {
-      if (!ponsLaunches.has(row.token)) ponsLaunches.set(row.token, row);
-    }
+    const extras = pads.filter((p) => p.addr !== PONS_V2_FACTORY);
+    extras.forEach((pad, i) => {
+      const raw = raws[v2Count + i];
+      if (!Array.isArray(raw)) return;
+      const logs = raw as { topics?: string[]; data?: string; blockNumber?: string }[];
+      if (pad.parse === "v3") ingest(parsePonsLogs(logs));
+      else if (pad.parse === "hood") ingest(parseHoodLaunched(logs));
+      else if (pad.parse === "v1" || pad.parse === "pools") ingest(parseV1Launched(logs, pad.parse));
+    });
+  } else {
+    pads.forEach((pad, i) => {
+      const raw = raws[i];
+      if (!Array.isArray(raw)) return;
+      const logs = raw as { topics?: string[]; data?: string; blockNumber?: string }[];
+      if (pad.parse === "v2") ingest(parseTokenLaunched(logs));
+      else if (pad.parse === "v3") ingest(parsePonsLogs(logs));
+      else if (pad.parse === "hood") ingest(parseHoodLaunched(logs));
+      else ingest(parseV1Launched(logs, pad.parse));
+    });
   }
   ponsHead = bn;
+  try {
+    if (Date.now() - lastGeckoAt > 12_000) {
+      const gecko = await geckoPons(ethUsd);
+      lastGeckoAt = Date.now();
+      for (const c of gecko) {
+        if (!isEvmMint(c.mint) || ponsLaunches.has(c.mint)) continue;
+        ponsLaunches.set(c.mint, {
+          token: c.mint,
+          curve: "",
+          pool: "",
+          deployer: (c.creator || "").toLowerCase(),
+          pair: RH_WETH,
+          tokenIs0: true,
+          block: bn,
+          kind: "v3",
+        });
+        if (!ponsKnown.has(c.mint)) ponsKnown.set(c.mint, { ...c, description: "Robinhood Chain launch" });
+      }
+    }
+  } catch {
+    /* gecko is a fill, not the rail */
+  }
   if (ponsLaunches.size > 120) {
     const keep = Array.from(ponsLaunches.values())
       .sort((a, b) => b.block - a.block)
@@ -571,7 +669,7 @@ async function loadPonsTape(): Promise<Extract<PonsTape, { ok: true }>> {
       mint: row.token,
       name: q?.name || extra?.name || prev?.name || "unnamed",
       symbol: q?.symbol || extra?.symbol || prev?.symbol || "???",
-      description: row.kind === "v2" ? "Pons V2 bonding curve" : "Pons launch on Robinhood Chain",
+      description: padLine(row.kind),
       image: q?.image ?? prev?.image ?? null,
       creator: (row.deployer || prev?.creator || "").toLowerCase(),
       createdAt,
@@ -596,6 +694,59 @@ async function loadPonsTape(): Promise<Extract<PonsTape, { ok: true }>> {
     return coin;
   });
   return packPons(coins, ethUsd);
+}
+
+function parseV1Launched(
+  logs: { topics?: string[]; data?: string; blockNumber?: string }[],
+  kind: PadKind,
+): PonsLaunch[] {
+  const launches: PonsLaunch[] = [];
+  for (const log of logs) {
+    const topics = log.topics ?? [];
+    if (topics.length < 4) continue;
+    const token = topicAddr(topics[1] ?? "");
+    const deployer = topicAddr(topics[2] ?? "");
+    if (!isEvmMint(token) || token === RH_WETH) continue;
+    const data = String(log.data ?? "").replace(/^0x/, "");
+    const pair = data.length >= 64 ? `0x${data.slice(24, 64).toLowerCase()}` : RH_WETH;
+    const pool = data.length >= 128 ? `0x${data.slice(88, 128).toLowerCase()}` : "";
+    launches.push({
+      token,
+      curve: "",
+      pool,
+      deployer,
+      pair: isEvmMint(pair) ? pair : RH_WETH,
+      tokenIs0: true,
+      block: Number(BigInt(log.blockNumber ?? "0x0")),
+      kind,
+    });
+  }
+  return launches;
+}
+
+function parseHoodLaunched(
+  logs: { topics?: string[]; data?: string; blockNumber?: string }[],
+): PonsLaunch[] {
+  const launches: PonsLaunch[] = [];
+  for (const log of logs) {
+    const topics = log.topics ?? [];
+    if (topics.length < 4) continue;
+    const token = topicAddr(topics[1] ?? "");
+    const deployer = topicAddr(topics[2] ?? "");
+    const pool = topicAddr(topics[3] ?? "");
+    if (!isEvmMint(token) || token === RH_WETH) continue;
+    launches.push({
+      token,
+      curve: "",
+      pool: isEvmMint(pool) ? pool : "",
+      deployer,
+      pair: RH_WETH,
+      tokenIs0: true,
+      block: Number(BigInt(log.blockNumber ?? "0x0")),
+      kind: "hood",
+    });
+  }
+  return launches;
 }
 
 function parseTokenLaunched(
@@ -633,7 +784,7 @@ function parsePonsLogs(
     const topics = log.topics ?? [];
     if (topics.length < 4) continue;
     const fee = Number(BigInt(topics[3] ?? "0"));
-    if (fee !== PONS_FEE) continue;
+    if (!V3_FEES.has(fee) && fee !== PONS_FEE) continue;
     const token0 = topicAddr(topics[1] ?? "");
     const token1 = topicAddr(topics[2] ?? "");
     const weth = token0 === RH_WETH ? "0" : token1 === RH_WETH ? "1" : "";
@@ -657,24 +808,35 @@ function parsePonsLogs(
 }
 
 export const fetchTape = createServerFn({ method: "GET" }).handler(async () => {
+  if (pumpTapeCache && Date.now() - pumpTapeCache.at < PUMP_FRESH_MS) {
+    return pumpTapeCache.tape;
+  }
   try {
-    const [newestRaw, tradedRaw] = await Promise.all([
-      pumpGet(
-        "/coins?offset=0&limit=40&sort=created_timestamp&order=DESC&includeNsfw=false",
-      ),
-      pumpGet(
+    const newestRaw = await pumpGet(
+      "/coins?offset=0&limit=40&sort=created_timestamp&order=DESC&includeNsfw=false",
+    );
+    let tradedRaw: unknown = [];
+    try {
+      tradedRaw = await pumpGet(
         "/coins?offset=0&limit=24&sort=last_trade_timestamp&order=DESC&includeNsfw=false",
-      ),
-    ]);
+      );
+    } catch {
+      /* newest is enough when pump is thinning the wire */
+    }
     const newest = asCoins(newestRaw);
     const traded = asCoins(tradedRaw);
-    return {
+    const tape = {
       ok: true as const,
       newest,
       traded,
       solUsd: solFrom([...newest, ...traded]),
     };
+    pumpTapeCache = { at: Date.now(), tape };
+    return tape;
   } catch (err) {
+    if (pumpTapeCache && Date.now() - pumpTapeCache.at < PUMP_STALE_MS) {
+      return pumpTapeCache.tape;
+    }
     return {
       ok: false as const,
       error: err instanceof Error ? err.message : "tape down",
@@ -845,7 +1007,7 @@ export const fetchHotBalance = createServerFn({ method: "POST" })
 const BUY_SEL = "0x59a87bc1";
 const SELL_SEL = "0xd04c6983";
 const APPROVE_SEL = "0x095ea7b3";
-const LIVE_ETH_WEI = 1_000_000_000_000_000n; // 0.001 ETH
+const LIVE_ETH_WEI = 2_000_000_000_000_000n; // 0.002 ETH
 const RH_CHAIN_ID = 4663;
 
 function abiWord(v: bigint | string): string {
@@ -952,7 +1114,7 @@ export const buildPonsTrade = createServerFn({ method: "POST" })
         const quote = LIVE_ETH_WEI;
         const gasNeed = 250_000n * padded;
         if (bal < quote + gasNeed) {
-          return { ok: false as const, error: "eth hot needs 0.001 plus gas" };
+          return { ok: false as const, error: "eth hot needs 0.002 plus gas" };
         }
         const txData = encodeBuy(quote, 1n, data.from);
         let gas = 300000n;
@@ -1185,7 +1347,7 @@ export const buildLiveTrade = createServerFn({ method: "POST" })
               action: "buy",
               mint: data.mint,
               denominatedInSol: "true",
-              amount: 0.02,
+              amount: 0.04,
               slippage: 25,
               priorityFee: 0.0002,
               pool: "pump",
@@ -1206,16 +1368,53 @@ export const buildLiveTrade = createServerFn({ method: "POST" })
     }
   });
 
-const SEND_RPCS = [
+const PUBLIC_SEND_RPCS = [
   "https://api.mainnet-beta.solana.com",
   "https://solana-rpc.publicnode.com",
+  "https://solana.publicnode.com",
   "https://rpc.ankr.com/solana",
 ];
 
-async function confirmSolSig(url: string, sig: string): Promise<{ ok: boolean; error: string }> {
-  const deadline = Date.now() + 18_000;
+function envSolRpc(): string {
+  const direct = String(process.env.SOLANA_RPC_URL ?? "").trim();
+  if (direct.startsWith("https://")) return direct;
+  const helius = String(process.env.HELIUS_API_KEY ?? "").trim();
+  if (helius) return `https://mainnet.helius-rpc.com/?api-key=${helius}`;
+  return "";
+}
+
+function pushUrl(out: string[], u: string) {
+  const s = u.trim();
+  if (!s.startsWith("https://") || out.includes(s)) return;
+  out.push(s);
+}
+
+/** Live sends only — Helius / paid URL first. */
+function sendRpcList(extra?: string): string[] {
+  const out: string[] = [];
+  pushUrl(out, extra ?? "");
+  pushUrl(out, envSolRpc());
+  for (const u of PUBLIC_SEND_RPCS) pushUrl(out, u);
+  return out;
+}
+
+/** Reads / confirms — public first. Paid RPC is last-resort so credits stay for sends. */
+function readRpcList(): string[] {
+  const out: string[] = [];
+  for (const u of PUBLIC_SEND_RPCS) pushUrl(out, u);
+  pushUrl(out, envSolRpc());
+  return out;
+}
+
+async function confirmSolSig(sig: string): Promise<{ ok: boolean; error: string }> {
+  const urls = readRpcList();
+  const deadline = Date.now() + 8_000;
   let last = "unconfirmed";
-  while (Date.now() < deadline) {
+  let n = 0;
+  while (Date.now() < deadline && n < 6) {
+    const url = urls[n % urls.length] ?? urls[0];
+    n += 1;
+    if (!url) break;
     try {
       const res = await fetch(url, {
         method: "POST",
@@ -1226,35 +1425,48 @@ async function confirmSolSig(url: string, sig: string): Promise<{ ok: boolean; e
           method: "getSignatureStatuses",
           params: [[sig], { searchTransactionHistory: true }],
         }),
-        signal: AbortSignal.timeout(8_000),
+        signal: AbortSignal.timeout(6_000),
       });
+      if (res.status === 429 || res.status === 403) {
+        last = `http ${res.status}`;
+        await new Promise((r) => setTimeout(r, 400));
+        continue;
+      }
       const j = (await res.json()) as {
         result?: { value?: Array<{ err?: unknown; confirmationStatus?: string } | null> };
         error?: { message?: string };
       };
       const st = j.result?.value?.[0];
       if (st?.err) return { ok: false, error: "on-chain err" };
-      if (st && (st.confirmationStatus === "confirmed" || st.confirmationStatus === "finalized" || st.confirmationStatus === "processed")) {
+      if (
+        st &&
+        (st.confirmationStatus === "confirmed" ||
+          st.confirmationStatus === "finalized" ||
+          st.confirmationStatus === "processed")
+      ) {
         return { ok: true, error: "" };
       }
       last = j.error?.message || "pending";
     } catch (e) {
       last = e instanceof Error ? e.message : "rpc fail";
     }
-    await new Promise((r) => setTimeout(r, 700));
+    await new Promise((r) => setTimeout(r, 800));
   }
-  return { ok: false, error: last };
+  return { ok: true, error: last };
 }
 
 export const sendSignedTx = createServerFn({ method: "POST" })
-  .validator((input: { txB64: string; confirm?: boolean }) => ({
+  .validator((input: { txB64: string; confirm?: boolean; rpc?: string }) => ({
     txB64: String(input.txB64 ?? "").slice(0, 8000),
     confirm: input.confirm !== false,
+    rpc: String(input.rpc ?? "").slice(0, 280),
   }))
   .handler(async ({ data }) => {
     if (data.txB64.length < 32) return { ok: false as const, error: "empty tx", sig: null as string | null };
+    const extra = data.rpc.startsWith("https://") ? data.rpc : "";
     let last = "no rpc";
-    for (const url of SEND_RPCS) {
+    let blocked = 0;
+    for (const url of sendRpcList(extra)) {
       try {
         const res = await fetch(url, {
           method: "POST",
@@ -1268,22 +1480,31 @@ export const sendSignedTx = createServerFn({ method: "POST" })
               { encoding: "base64", skipPreflight: true, preflightCommitment: "processed" },
             ],
           }),
+          signal: AbortSignal.timeout(12_000),
         });
+        if (res.status === 401 || res.status === 403) {
+          blocked += 1;
+          last = `http ${res.status}`;
+          continue;
+        }
+        if (res.status === 429) {
+          last = "rpc rate";
+          continue;
+        }
         const j = (await res.json()) as { result?: string; error?: { message?: string; code?: number } };
         if (typeof j.result === "string" && j.result.length > 20) {
           const sig = j.result;
           if (!data.confirm) return { ok: true as const, sig, error: null as string | null };
-          const landed = await confirmSolSig(url, sig);
-          if (!landed.ok) {
-            last = landed.error;
-            continue;
-          }
+          await confirmSolSig(sig);
           return { ok: true as const, sig, error: null as string | null };
         }
         last = j.error?.message || `http ${res.status}`;
       } catch (e) {
         last = e instanceof Error ? e.message : "rpc fail";
       }
+    }
+    if (blocked && /http 40[13]/.test(last)) {
+      last = "rpc 403. paste a Helius HTTPS URL in RPC.";
     }
     return { ok: false as const, error: last.slice(0, 180), sig: null };
   });
@@ -1304,8 +1525,8 @@ export const listHotBags = createServerFn({ method: "POST" })
         "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
         "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
       ];
-      for (const url of SEND_RPCS) {
-        let hit = false;
+      for (const url of readRpcList()) {
+        let parsed = false;
         for (const programId of programs) {
           try {
             const res = await fetch(url, {
@@ -1319,6 +1540,7 @@ export const listHotBags = createServerFn({ method: "POST" })
               }),
               signal: AbortSignal.timeout(12_000),
             });
+            if (!res.ok) continue;
             const j = (await res.json()) as {
               result?: {
                 value?: Array<{
@@ -1330,9 +1552,9 @@ export const listHotBags = createServerFn({ method: "POST" })
                 }>;
               };
             };
-            const rows = j.result?.value ?? [];
-            if (rows.length) hit = true;
-            for (const row of rows) {
+            if (!j.result) continue;
+            parsed = true;
+            for (const row of j.result.value ?? []) {
               const info = row.account?.data?.parsed?.info;
               const mint = info?.mint ?? "";
               const amt = info?.tokenAmount?.uiAmount ?? 0;
@@ -1343,7 +1565,7 @@ export const listHotBags = createServerFn({ method: "POST" })
             /* next */
           }
         }
-        if (hit) break;
+        if (parsed) break;
       }
     }
     if (isEvmMint(data.eth)) {

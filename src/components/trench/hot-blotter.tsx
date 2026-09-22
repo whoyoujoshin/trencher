@@ -106,7 +106,7 @@ export function HotBlotter() {
           </Link>
         </div>
         <p className="mt-3 max-w-2xl text-sm leading-relaxed text-muted text-pretty">
-          Desk $ is the paper clip. Wallet $ is the live 0.02 SOL / 0.001 ETH clip, and only
+          Desk $ is the paper clip. Wallet $ is the live 0.04 SOL / 0.002 ETH clip, and only
           after the sell lands. If it says selling or sell missed, the tokens are still in
           the hot wallet — TILL keeps retrying.
         </p>

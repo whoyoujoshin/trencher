@@ -1,1 +1,0 @@
-/tmp/trench-p0/src/lib/trench/logic-core.ts

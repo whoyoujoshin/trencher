@@ -3,7 +3,7 @@ on:
   push:
     branches: [feat/profit-loop-p0]
     paths:
-      - "scripts/land-profit-loop-p0.mjs"
+      - "scripts/land-part-*.txt"
       - ".github/workflows/land-profit-loop-p0.yml"
   workflow_dispatch:
 permissions:
@@ -16,6 +16,8 @@ jobs:
         with:
           ref: feat/profit-loop-p0
           token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Assemble land script
+        run: cat scripts/land-part-0.txt scripts/land-part-1.txt scripts/land-part-2.txt scripts/land-part-3.txt > scripts/land-profit-loop-p0.mjs
       - name: Expand logic + patch store
         run: node scripts/land-profit-loop-p0.mjs
       - name: Commit landed sources
@@ -24,6 +26,7 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add -A src/lib/trench/logic.ts src/lib/trench/store.ts
           git add -u src/lib/trench/logic-core.ts src/lib/trench/logic-tail.ts src/lib/trench/.profit-loop-marker || true
+          git add scripts/land-profit-loop-p0.mjs || true
           if git diff --cached --quiet; then
             echo "nothing to commit"
           else

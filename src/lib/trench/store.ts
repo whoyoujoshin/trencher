@@ -75,6 +75,7 @@ import { ntfyHeartbeat, pingNtfy } from "./ntfy";
 import { gmgnKey } from "./gmgn";
 import { amHunter, deskPin, syncCloud } from "./cloud";
 import { LIVE_CAP_ETH, LIVE_CAP_SOL, LIVE_ETH_USD, LIVE_ETH_FUND, ethHotBuy, ethHotSell, flattenHot as flattenHotBags, hotAutoArmed, hotBuy, hotSell, isLiveMint, peekEthHot, refreshEthHot, refreshHot, shadowQuote, signOneBuy, signOneState } from "./wallet";
+import { blankCold, coldDue, coldLine, saneCold, type ColdHold, type ColdRail } from "./cold";
 import { buildShadowFill, shadowLearnOn, shadowTillLine } from "./shadow";
 import { canonHasBlood, canonToMetaSeed, canonToPlaybook } from "./canon";
 import { useSpirit } from "./spirit";
@@ -187,6 +188,11 @@ type TrenchState = {
   hotSol: number | null;
   hotEthAddr: string | null;
   hotEth: number | null;
+  /** Last pump-tape SOL/USD. Never the Pons print (that one is ETH). */
+  solPx: number | null;
+  /** Last Pons-tape ETH/USD. Null falls back to LIVE_ETH_USD for the cap. */
+  ethPx: number | null;
+  coldHold: ColdHold;
   lastHotLine: string | null;
   lastGmgn: { symbol: string; text: string; veto: boolean; at: number } | null;
   atHome: boolean;
@@ -207,6 +213,7 @@ type TrenchState = {
   dumpClip: (mint: string) => void;
   dumpRunners: () => void;
   flattenHot: () => Promise<void>;
+  ackCold: (rail: ColdRail) => Promise<void>;
   cycle: () => Promise<void>;
   askMeta: () => Promise<void>;
   readLosers: () => Promise<void>;
@@ -247,7 +254,7 @@ function blankHouse(): House {
 
 function initial(): Omit<
   TrenchState,
-  "setHydrated" | "arm" | "clone" | "killClone" | "payRent" | "dumpClip" | "dumpRunners" | "flattenHot" | "cycle" | "askMeta" | "readLosers" | "snapshotBook" | "ingestBook" | "spawnRival" | "setSoloDesk" | "cull" | "setFocus" | "spectate" | "goHome" | "leaveHome" | "setTapeVenue"
+  "setHydrated" | "arm" | "clone" | "killClone" | "payRent" | "dumpClip" | "dumpRunners" | "flattenHot" | "ackCold" | "cycle" | "askMeta" | "readLosers" | "snapshotBook" | "ingestBook" | "spawnRival" | "setSoloDesk" | "cull" | "setFocus" | "spectate" | "goHome" | "leaveHome" | "setTapeVenue"
 > {
   return {
     hydrated: false,
@@ -297,6 +304,9 @@ function initial(): Omit<
     hotSol: null,
     hotEthAddr: null,
     hotEth: null,
+    solPx: null,
+    ethPx: null,
+    coldHold: blankCold(),
     lastHotLine: null,
     lastGmgn: null,
     atHome: false,
@@ -435,6 +445,50 @@ export const useTrench = create<TrenchState>()(
         });
       }
 
+      function pxOf(rail: ColdRail): number {
+        if (rail === "eth") {
+          const p = get().ethPx;
+          return p != null && p > 0 ? p : LIVE_ETH_USD;
+        }
+        const p = get().solPx;
+        return p != null && p > 0 ? p : 0;
+      }
+
+      /** Latch or clear the $50 hunt cap from a fresh native balance. Does not send. */
+      function applyCold(rail: ColdRail, native: number | null) {
+        if (native == null || !Number.isFinite(native) || native < 0) return;
+        const price = pxOf(rail);
+        if (!(price > 0)) return;
+        const due = coldDue(rail, native, price);
+        const prev = get().coldHold?.[rail] ?? null;
+        if (!due) {
+          if (!prev) return;
+          set((s) => ({ coldHold: { ...s.coldHold, [rail]: null } }));
+          const unit = rail === "sol" ? "SOL" : "ETH";
+          log("TILL", "till", `${unit} hunt back under $50. HOT buys open.`);
+          return;
+        }
+        set((s) => ({ coldHold: { ...s.coldHold, [rail]: due } }));
+        if (!prev || Math.abs(prev.sweepUsd - due.sweepUsd) >= 2) {
+          const line = coldLine(due);
+          log("TILL", "till", line);
+          set({ lastHotLine: line.slice(0, 80) });
+        }
+      }
+
+      async function pullRail(rail: ColdRail): Promise<number | null> {
+        if (rail === "eth") {
+          const h = await refreshEthHot();
+          set({ hotEthAddr: h.address, hotEth: h.eth });
+          applyCold("eth", h.eth);
+          return h.eth;
+        }
+        const h = await refreshHot();
+        set({ hotPubkey: h.pubkey, hotSol: h.sol });
+        applyCold("sol", h.sol);
+        return h.sol;
+      }
+
       function vetTag() {
         return get().callsign || "body";
       }
@@ -530,6 +584,7 @@ export const useTrench = create<TrenchState>()(
               dropDebt(d.mint);
               patchSettle(d.mint, true, r.hash);
               pingNtfy("TRENCHER", `HOT SELL $${d.symbol} settled`, true);
+              void pullRail(isEvmMint(d.mint) ? "eth" : "sol");
             }
           });
         }
@@ -883,6 +938,13 @@ export const useTrench = create<TrenchState>()(
         const baseFloor = liveFloor(book, wxNow(), spiritNow());
         const floor = ripperFloor(baseFloor, coin, Date.now(), heatScore ? { venue: isEvmMint(mint) ? "pons" : "pump", at: Date.now(), ok: true, launches: 0, named: 0, live: 0, runners: 0, flowUsd: 0, newestAgeMs: 0, score: heatScore } : null);
         const spend = async (): Promise<boolean> => {
+          const evm = isEvmMint(mint);
+          const rail: ColdRail = evm ? "eth" : "sol";
+          const hold = get().coldHold?.[rail] ?? null;
+          if (hold) {
+            skip(coldLine(hold), `live:cold:${rail}`, 20_000);
+            return false;
+          }
           if (!hotAutoArmed() && signOneState() !== "armed") {
             skip(`hot is not armed. $${symbol} scored ${score}. no fill.`, "live:off", 30_000);
             return false;
@@ -892,7 +954,6 @@ export const useTrench = create<TrenchState>()(
             return false;
           }
           const now = Date.now();
-          const evm = isEvmMint(mint);
           if (evm) {
             if (now - ethBurstAt > 8_000) ethBurst = 0;
             if (ethBurst >= 1) {
@@ -1091,6 +1152,7 @@ export const useTrench = create<TrenchState>()(
           if (r.ok) {
             dropDebt(mint);
             pingNtfy("TRENCHER", `HOT SELL $${symbol}`, true);
+            void pullRail(isEvmMint(mint) ? "eth" : "sol");
           } else {
             oweSell(mint, symbol);
             if (gmgnKey() && !hush(`gmgn:sell:${mint}`, 90_000)) {
@@ -2437,12 +2499,37 @@ export const useTrench = create<TrenchState>()(
               `flattened ${r.sold}/${r.n} leftover bags. ${r.missed ? `${r.missed} still stuck (curve dead or portal dark).` : "wallet should only hold SOL/ETH now."}`,
             );
             set({ lastHotLine: `flatten ${r.sold}/${r.n}` });
-            void refreshHot().then((h) => set({ hotPubkey: h.pubkey, hotSol: h.sol }));
-            void refreshEthHot().then((h) => set({ hotEthAddr: h.address, hotEth: h.eth }));
+            void pullRail("sol");
+            void pullRail("eth");
           } catch (e) {
             log("TILL", "sys", e instanceof Error ? e.message : "flatten failed.");
           } finally {
             flatteningBags = false;
+          }
+        },
+
+        ackCold: async (rail) => {
+          if (get().status === "watch") {
+            log("TILL", "sys", "this window is watching. hunter marks the sweep.");
+            return;
+          }
+          const native = await pullRail(rail);
+          const price = pxOf(rail);
+          if (native == null || !(price > 0)) {
+            log(
+              "TILL",
+              "sys",
+              rail === "sol"
+                ? "no SOL price or balance yet. hunt stays blocked until the pump tape prints."
+                : "ETH balance unread. hunt stays blocked.",
+            );
+            return;
+          }
+          const due = coldDue(rail, native, price);
+          if (due) {
+            log("TILL", "till", "still over $50. sweep first. Till does not send.");
+            set({ lastHotLine: "still over $50. sweep first." });
+            return;
           }
         },
 
@@ -2524,6 +2611,7 @@ export const useTrench = create<TrenchState>()(
               void refreshHot().then((h) => {
                 const prev = get().hotSol;
                 set({ hotPubkey: h.pubkey, hotSol: h.sol });
+                applyCold("sol", h.sol);
                 if (h.sol != null && prev != null && Math.abs(h.sol - prev) >= 0.001) {
                   log("TILL", "till", `hot wallet ${h.sol.toFixed(3)} SOL.`);
                 }
@@ -2531,6 +2619,7 @@ export const useTrench = create<TrenchState>()(
               void refreshEthHot().then((h) => {
                 const prev = get().hotEth;
                 set({ hotEthAddr: h.address, hotEth: h.eth });
+                applyCold("eth", h.eth);
                 if (h.eth != null && prev != null && Math.abs(h.eth - prev) >= 0.0001) {
                   log("TILL", "till", `ETH hot ${h.eth.toFixed(4)} ETH.`);
                 }
@@ -2557,7 +2646,17 @@ export const useTrench = create<TrenchState>()(
               }
             }
             if (tape.ok) {
-              set({ tapeError: null, solUsd: tape.solUsd, lastCycleAt: Date.now() });
+              const px = tape.solUsd;
+              const onPons = get().tapeVenue === "pons";
+              set({
+                tapeError: null,
+                solUsd: px,
+                lastCycleAt: Date.now(),
+                ...(onPons && px > 0 ? { ethPx: px } : {}),
+                ...(!onPons && px > 0 ? { solPx: px } : {}),
+              });
+              if (onPons) applyCold("eth", get().hotEth);
+              else applyCold("sol", get().hotSol);
             } else {
               set({ lastCycleAt: Date.now() });
             }
@@ -3563,6 +3662,9 @@ ${tapeHay}`),
           housePot: typeof p.housePot === "number" ? p.housePot : 0,
           houseBank: typeof p.houseBank === "number" ? p.houseBank : 0,
           lastHotLine: typeof p.lastHotLine === "string" ? p.lastHotLine : null,
+          solPx: typeof p.solPx === "number" && p.solPx > 0 && p.solPx < 100_000 ? p.solPx : null,
+          ethPx: typeof p.ethPx === "number" && p.ethPx > 0 && p.ethPx < 100_000 ? p.ethPx : null,
+          coldHold: saneCold(p.coldHold),
           lastGmgn:
             p.lastGmgn && typeof p.lastGmgn === "object"
               ? (p.lastGmgn as TrenchState["lastGmgn"])
@@ -3672,6 +3774,9 @@ ${tapeHay}`),
         houseBank: s.houseBank ?? 0,
         lastHotLine: s.lastHotLine ?? null,
         lastGmgn: s.lastGmgn ?? null,
+        solPx: s.solPx != null && s.solPx > 0 ? s.solPx : null,
+        ethPx: s.ethPx != null && s.ethPx > 0 ? s.ethPx : null,
+        coldHold: s.coldHold ?? blankCold(),
         tapeVenue: s.tapeVenue === "pons" ? "pons" : "pump",
         callsign: s.callsign || "",
         round: s.round ?? 1,

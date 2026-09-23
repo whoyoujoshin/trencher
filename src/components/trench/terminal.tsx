@@ -10,6 +10,7 @@ import {
 import { Link } from "@tanstack/react-router";
 import { Button } from "@/components/ui/button";
 import { bootTrench, deskMastery, equityNow, useTrench } from "@/lib/trench/store";
+import { coldLine } from "@/lib/trench/cold";
 import { useSpirit } from "@/lib/trench/spirit";
 import {
   AGENTS,
@@ -834,6 +835,7 @@ function WakeScreen({
           widens it. Stake {formatUsd(STARTING_CASH, 0)}. The gate starts at {formatUsd(gateUsd(1), 0)}
           and climbs each cell — Warden climbs with it. Pay the gate or get deleted.
           Pump.fun is HOT SOL. Robinhood Chain is HOT ETH on the Pons curve. Other RH pads are skipped until a router exists. No paper fills.
+          Hunt cap is $50. Anything over that stays as SOL or ETH on a cold pile. Till blocks the next HOT buy and does not send.
         </p>
         <div className="stagger-in flex flex-col gap-3 sm:flex-row sm:items-center">
           {hunting ? (
@@ -991,6 +993,8 @@ function Desk({
   const hotPubkey = useTrench((s) => s.hotPubkey);
   const hotEth = useTrench((s) => s.hotEth);
   const hotEthAddr = useTrench((s) => s.hotEthAddr);
+  const coldHold = useTrench((s) => s.coldHold);
+  const ackCold = useTrench((s) => s.ackCold);
   const logs = useTrench((s) => s.logs);
   const lastHotLine = useTrench((s) => s.lastHotLine);
   const lastGmgn = useTrench((s) => s.lastGmgn);
@@ -1258,13 +1262,14 @@ function Desk({
             <Stat
               label="SOL"
               value={hotSol == null ? "—" : `${hotSol.toFixed(3)} SOL`}
-              tone={(hotSol ?? 0) >= 0.045 ? "gain" : (hotSol ?? 0) > 0 ? "warn" : undefined}
+              tone={coldHold?.sol ? "loss" : (hotSol ?? 0) >= 0.045 ? "gain" : (hotSol ?? 0) > 0 ? "warn" : undefined}
             />
             <Stat
               label="ETH"
               value={hotEth == null ? "—" : `${hotEth.toFixed(4)} ETH`}
-              tone={(hotEth ?? 0) >= 0.0024 ? "gain" : (hotEth ?? 0) > 0 ? "warn" : undefined}
+              tone={coldHold?.eth ? "loss" : (hotEth ?? 0) >= 0.0024 ? "gain" : (hotEth ?? 0) > 0 ? "warn" : undefined}
             />
+            <Stat label="Cap" value="$50" tone={coldHold?.sol || coldHold?.eth ? "loss" : undefined} />
             <Stat
               label="Rail"
               value={
@@ -1346,6 +1351,43 @@ function Desk({
               }
             />
           </dl>
+          {coldHold?.sol || coldHold?.eth ? (
+            <div className="basis-full flex flex-col gap-2 border border-warn/50 bg-warn/10 px-3 py-2">
+              <p className="font-mono text-2xs text-warn">
+                Hunt wallet is over $50. Move the excess yourself — Till does not send. HOT buys on that rail stay blocked until the wallet reads $50 or under.
+              </p>
+              {coldHold.sol ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="font-mono text-2xs text-fg">{coldLine(coldHold.sol)}</p>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={status === "watch"}
+                    onClick={() => void ackCold("sol")}
+                  >
+                    I swept SOL
+                  </Button>
+                </div>
+              ) : null}
+              {coldHold.eth ? (
+                <div className="flex flex-wrap items-center gap-2">
+                  <p className="font-mono text-2xs text-fg">{coldLine(coldHold.eth)}</p>
+                  <Button
+                    size="sm"
+                    variant="primary"
+                    disabled={status === "watch"}
+                    onClick={() => void ackCold("eth")}
+                  >
+                    I swept ETH
+                  </Button>
+                </div>
+              ) : null}
+            </div>
+          ) : (
+            <p className="basis-full font-mono text-2xs text-subtle">
+              Hunt cap $50. Anything above stays as SOL or ETH on a cold pile. Till blocks the next HOT buy and does not send.
+            </p>
+          )}
           <p className="font-mono text-2xs text-subtle">
             {tapeVenue === "pons"
               ? "Clips only book after HOT spends 0.002 ETH on the Pons curve. hood.fun / pools.trade have no router — skipped. SOL stays on pump."

@@ -20,7 +20,7 @@ Never commit a hot-wallet secret. Never log a private key. Never put live key ma
 - RISK eases a stop only on a sample, never on one clip.
 - SNIPER never averages and never enters without an exit.
 - Warden grades kills after `GRADE_AFTER_MS`. `grade=pending` is not a label.
-- Hunt wallet cap is $50 of native (SOL on pump, ETH on Robinhood/Pons). Excess is the operator's to sweep cold as that same coin. Till logs `SWEEP` and blocks the next HOT buy on that rail until the wallet reads at or under $50. Till never sends. Do not store a cold key. Paper and Hatch stay on separate tapes. Clip caps (`LIVE_CAP_SOL` / `LIVE_CAP_ETH`) are not this ceiling.
+- Hunt wallet play bank is $50 of native (SOL on pump, ETH on Robinhood/Pons). Till reserves anything over that in the same wallet and does not send it. HOT may spend only the $50 play bank; buys do not refill that bank from the reserve. Paper and Hatch stay on separate tapes. Clip caps (`LIVE_CAP_SOL` / `LIVE_CAP_ETH`) are not this ceiling.
 
 ## When changing learning behavior
 

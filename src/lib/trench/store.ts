@@ -75,7 +75,7 @@ import { ntfyHeartbeat, pingNtfy } from "./ntfy";
 import { gmgnKey } from "./gmgn";
 import { amHunter, deskPin, syncCloud } from "./cloud";
 import { LIVE_CAP_ETH, LIVE_CAP_SOL, LIVE_ETH_USD, LIVE_ETH_FUND, ethHotBuy, ethHotSell, flattenHot as flattenHotBags, hotAutoArmed, hotBuy, hotSell, isLiveMint, peekEthHot, refreshEthHot, refreshHot, shadowQuote, signOneBuy, signOneState } from "./wallet";
-import { blankCold, coldDue, coldLine, saneCold, type ColdHold, type ColdRail } from "./cold";
+import { blankCold, coldLine, playCoversClip, saneCold, settleReserve, type ColdHold, type ColdRail } from "./cold";
 import { buildShadowFill, shadowLearnOn, shadowTillLine } from "./shadow";
 import { canonHasBlood, canonToMetaSeed, canonToPlaybook } from "./canon";
 import { useSpirit } from "./spirit";
@@ -213,7 +213,6 @@ type TrenchState = {
   dumpClip: (mint: string) => void;
   dumpRunners: () => void;
   flattenHot: () => Promise<void>;
-  ackCold: (rail: ColdRail) => Promise<void>;
   cycle: () => Promise<void>;
   askMeta: () => Promise<void>;
   readLosers: () => Promise<void>;
@@ -254,7 +253,7 @@ function blankHouse(): House {
 
 function initial(): Omit<
   TrenchState,
-  "setHydrated" | "arm" | "clone" | "killClone" | "payRent" | "dumpClip" | "dumpRunners" | "flattenHot" | "ackCold" | "cycle" | "askMeta" | "readLosers" | "snapshotBook" | "ingestBook" | "spawnRival" | "setSoloDesk" | "cull" | "setFocus" | "spectate" | "goHome" | "leaveHome" | "setTapeVenue"
+  "setHydrated" | "arm" | "clone" | "killClone" | "payRent" | "dumpClip" | "dumpRunners" | "flattenHot" | "cycle" | "askMeta" | "readLosers" | "snapshotBook" | "ingestBook" | "spawnRival" | "setSoloDesk" | "cull" | "setFocus" | "spectate" | "goHome" | "leaveHome" | "setTapeVenue"
 > {
   return {
     hydrated: false,
@@ -454,18 +453,18 @@ export const useTrench = create<TrenchState>()(
         return p != null && p > 0 ? p : 0;
       }
 
-      /** Latch or clear the $50 hunt cap from a fresh native balance. Does not send. */
+      /** Reserve native above the $50 play bank. Does not send, and does not refill the bank from the reserve. */
       function applyCold(rail: ColdRail, native: number | null) {
         if (native == null || !Number.isFinite(native) || native < 0) return;
         const price = pxOf(rail);
         if (!(price > 0)) return;
-        const due = coldDue(rail, native, price);
         const prev = get().coldHold?.[rail] ?? null;
+        const due = settleReserve(prev, rail, native, price);
+        const unit = rail === "sol" ? "SOL" : "ETH";
         if (!due) {
           if (!prev) return;
           set((s) => ({ coldHold: { ...s.coldHold, [rail]: null } }));
-          const unit = rail === "sol" ? "SOL" : "ETH";
-          log("TILL", "till", `${unit} hunt back under $50. HOT buys open.`);
+          log("TILL", "till", `${unit} reserve cleared. HOT plays with the hunt wallet.`);
           return;
         }
         set((s) => ({ coldHold: { ...s.coldHold, [rail]: due } }));
@@ -941,8 +940,15 @@ export const useTrench = create<TrenchState>()(
           const evm = isEvmMint(mint);
           const rail: ColdRail = evm ? "eth" : "sol";
           const hold = get().coldHold?.[rail] ?? null;
-          if (hold) {
-            skip(coldLine(hold), `live:cold:${rail}`, 20_000);
+          const clip = evm ? LIVE_CAP_ETH : LIVE_CAP_SOL;
+          const fee = evm ? 0.0004 : 0.005;
+          if (hold && !playCoversClip(hold.keepNative, clip, fee)) {
+            const unit = evm ? "ETH" : "SOL";
+            skip(
+              `play bank ${hold.keepNative.toFixed(evm ? 5 : 4)} ${unit} is under a clip. Till is holding ${hold.sweepNative.toFixed(evm ? 5 : 4)} ${unit} in reserve.`,
+              `live:cold:${rail}`,
+              20_000,
+            );
             return false;
           }
           if (!hotAutoArmed() && signOneState() !== "armed") {
@@ -2505,31 +2511,6 @@ export const useTrench = create<TrenchState>()(
             log("TILL", "sys", e instanceof Error ? e.message : "flatten failed.");
           } finally {
             flatteningBags = false;
-          }
-        },
-
-        ackCold: async (rail) => {
-          if (get().status === "watch") {
-            log("TILL", "sys", "this window is watching. hunter marks the sweep.");
-            return;
-          }
-          const native = await pullRail(rail);
-          const price = pxOf(rail);
-          if (native == null || !(price > 0)) {
-            log(
-              "TILL",
-              "sys",
-              rail === "sol"
-                ? "no SOL price or balance yet. hunt stays blocked until the pump tape prints."
-                : "ETH balance unread. hunt stays blocked.",
-            );
-            return;
-          }
-          const due = coldDue(rail, native, price);
-          if (due) {
-            log("TILL", "till", "still over $50. sweep first. Till does not send.");
-            set({ lastHotLine: "still over $50. sweep first." });
-            return;
           }
         },
 

@@ -974,34 +974,44 @@ export const fetchCreator = createServerFn({ method: "POST" })
   });
 
 export const fetchHotBalance = createServerFn({ method: "POST" })
-  .validator((input: { pubkey: string }) => ({
+  .validator((input: { pubkey: string; rpc?: string }) => ({
     pubkey: String(input.pubkey ?? "").slice(0, 64),
+    rpc: String(input.rpc ?? "").slice(0, 280),
   }))
   .handler(async ({ data }) => {
     if (data.pubkey.length < 32) return { ok: false as const, error: "bad pubkey", sol: null as number | null };
-    try {
-      const res = await fetch("https://api.mainnet-beta.solana.com", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          jsonrpc: "2.0",
-          id: 1,
-          method: "getBalance",
-          params: [data.pubkey],
-        }),
-      });
-      const j = (await res.json()) as { result?: { value?: number }; error?: { message?: string } };
-      if (j.error?.message) return { ok: false as const, error: j.error.message, sol: null };
-      const lamports = j.result?.value ?? 0;
-      const sol = Math.round((lamports / 1_000_000_000) * 10000) / 10000;
-      return { ok: true as const, sol, error: null as string | null };
-    } catch (e) {
-      return {
-        ok: false as const,
-        error: e instanceof Error ? e.message : "rpc dark",
-        sol: null,
-      };
+    const extra = data.rpc.startsWith("https://") ? data.rpc : "";
+    let last = "rpc dark";
+    for (const url of readRpcList(extra)) {
+      try {
+        const res = await fetch(url, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            jsonrpc: "2.0",
+            id: 1,
+            method: "getBalance",
+            params: [data.pubkey],
+          }),
+          signal: AbortSignal.timeout(8_000),
+        });
+        if (res.status === 401 || res.status === 403 || res.status === 429) {
+          last = `http ${res.status}`;
+          continue;
+        }
+        const j = (await res.json()) as { result?: { value?: number }; error?: { message?: string } };
+        if (j.error?.message) {
+          last = j.error.message;
+          continue;
+        }
+        const lamports = j.result?.value ?? 0;
+        const sol = Math.round((lamports / 1_000_000_000) * 10000) / 10000;
+        return { ok: true as const, sol, error: null as string | null };
+      } catch (e) {
+        last = e instanceof Error ? e.message : "rpc dark";
+      }
     }
+    return { ok: false as const, error: last.slice(0, 180), sol: null };
   });
 
 const BUY_SEL = "0x59a87bc1";
@@ -1398,16 +1408,17 @@ function sendRpcList(extra?: string): string[] {
   return out;
 }
 
-/** Reads / confirms — public first. Paid RPC is last-resort so credits stay for sends. */
-function readRpcList(): string[] {
+/** Reads / confirms. Saved Helius URL first when the desk passed one. */
+function readRpcList(extra?: string): string[] {
   const out: string[] = [];
-  for (const u of PUBLIC_SEND_RPCS) pushUrl(out, u);
+  pushUrl(out, extra ?? "");
   pushUrl(out, envSolRpc());
+  for (const u of PUBLIC_SEND_RPCS) pushUrl(out, u);
   return out;
 }
 
-async function confirmSolSig(sig: string): Promise<{ ok: boolean; error: string }> {
-  const urls = readRpcList();
+async function confirmSolSig(sig: string, extra?: string): Promise<{ ok: boolean; error: string }> {
+  const urls = readRpcList(extra);
   const deadline = Date.now() + 8_000;
   let last = "unconfirmed";
   let n = 0;
@@ -1495,7 +1506,7 @@ export const sendSignedTx = createServerFn({ method: "POST" })
         if (typeof j.result === "string" && j.result.length > 20) {
           const sig = j.result;
           if (!data.confirm) return { ok: true as const, sig, error: null as string | null };
-          await confirmSolSig(sig);
+          await confirmSolSig(sig, extra);
           return { ok: true as const, sig, error: null as string | null };
         }
         last = j.error?.message || `http ${res.status}`;
@@ -1503,8 +1514,11 @@ export const sendSignedTx = createServerFn({ method: "POST" })
         last = e instanceof Error ? e.message : "rpc fail";
       }
     }
+    if (extra) {
+      return { ok: false as const, error: `saved rpc: ${last}`.slice(0, 180), sig: null };
+    }
     if (blocked && /http 40[13]/.test(last)) {
-      last = "rpc 403. paste a Helius HTTPS URL in RPC.";
+      last = "rpc 403. paste a Helius HTTPS URL or API key in RPC.";
     }
     return { ok: false as const, error: last.slice(0, 180), sig: null };
   });
@@ -1513,19 +1527,21 @@ const WSOL = "So11111111111111111111111111111111111111112";
 const SKIP_ETH = new Set([RH_WETH.toLowerCase(), PONS_USDG.toLowerCase()]);
 
 export const listHotBags = createServerFn({ method: "POST" })
-  .validator((input: { sol?: string; eth?: string }) => ({
+  .validator((input: { sol?: string; eth?: string; rpc?: string }) => ({
     sol: String(input.sol ?? "").slice(0, 64),
     eth: String(input.eth ?? "").slice(0, 42).toLowerCase(),
+    rpc: String(input.rpc ?? "").slice(0, 280),
   }))
   .handler(async ({ data }) => {
     const sol: { mint: string; amount: number }[] = [];
     const eth: { mint: string; amount: string }[] = [];
+    const extra = data.rpc.startsWith("https://") ? data.rpc : "";
     if (data.sol.length >= 32) {
       const programs = [
         "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",
         "TokenzQdBNbLqP5VEhdkAS6EPFLC1PHnBqCXEpPxuEb",
       ];
-      for (const url of readRpcList()) {
+      for (const url of readRpcList(extra)) {
         let parsed = false;
         for (const programId of programs) {
           try {

@@ -223,7 +223,7 @@ export function setHotAuto(on: boolean): boolean {
 }
 
 async function rpcBalance(pubkey: string): Promise<number> {
-  const r = await fetchHotBalance({ data: { pubkey } });
+  const r = await fetchHotBalance({ data: { pubkey, rpc: solRpcUrl() } });
   if (!r.ok || r.sol == null) throw new Error(r.error || "rpc dark");
   return r.sol;
 }
@@ -598,7 +598,7 @@ export async function flattenHot(): Promise<{
   const ethHot = peekEthHot();
   let bags: { sol: { mint: string }[]; eth: { mint: string }[] } = { sol: [], eth: [] };
   try {
-    bags = await listHotBags({ data: { sol: solHot.pubkey, eth: ethHot.address } });
+    bags = await listHotBags({ data: { sol: solHot.pubkey, eth: ethHot.address, rpc: solRpcUrl() } });
   } catch {
     /* fall back to live mints */
   }

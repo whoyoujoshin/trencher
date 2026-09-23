@@ -835,6 +835,7 @@ function WakeScreen({
           widens it. Stake {formatUsd(STARTING_CASH, 0)}. The gate starts at {formatUsd(gateUsd(1), 0)}
           and climbs each cell — Warden climbs with it. Pay the gate or get deleted.
           Pump.fun is HOT SOL. Robinhood Chain is HOT ETH on the Pons curve. Other RH pads are skipped until a router exists. No paper fills.
+          Hunt cap is $50. Anything over that stays as SOL or ETH on a cold pile. Till blocks the next HOT buy and does not send.
         </p>
         <div className="stagger-in flex flex-col gap-3 sm:flex-row sm:items-center">
           {hunting ? (

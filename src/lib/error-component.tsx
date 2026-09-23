@@ -3,7 +3,7 @@ import type { ErrorComponentProps } from "@tanstack/react-router";
 import { TriangleAlert } from "lucide-react";
 
 function isStaleChunk(message: string): boolean {
-  return /failed to fetch dynamically imported module|loading chunk \d+|importing a module script failed/i.test(
+  return /dynamically imported module|loading chunk|importing a module script failed|failed to load module script|mime type/i.test(
     message,
   );
 }

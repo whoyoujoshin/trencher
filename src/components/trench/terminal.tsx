@@ -51,7 +51,7 @@ import {
   setHotAuto,
   signOneState,
 } from "@/lib/trench/wallet";
-import { blankPlaybook, clipsInDay, formatWeather, liveFloor, pickHotLane, pnlPct, positionValue, protectSpec, trailSpec, wardenScore } from "@/lib/trench/logic";
+import { blankPlaybook, clipsInDay, liveFloor, pickHotLane, pnlPct, positionValue, protectSpec, trailSpec, wardenScore } from "@/lib/trench/logic";
 import { hardReload } from "@/lib/error-component";
 
 const ICONS: Record<AgentId, typeof Radio> = {
@@ -219,7 +219,7 @@ function TrenchInner() {
   // Dead wins over home — otherwise Kill clone / pay gate never reach the desk.
   if (status === "dead") return <DeathScreen />;
   if (atHome || (status === "idle" && !hasCell)) {
-    return <WakeScreen ready hunting={hasCell} eyes={cloudEyes} role={cloudRole} />;
+    return <WakeScreen ready hunting={hasCell} />;
   }
   return <Desk cloudRole={cloudRole} eyes={cloudEyes} />;
 }
@@ -345,9 +345,18 @@ function RpcDock() {
     const u = solRpcUrl();
     setUrl(u);
     setArmed(u);
+    if (u) setMsg("rpc stays on in this browser.");
   }, []);
 
   function save() {
+    const trimmed = url.trim();
+    if (!trimmed && solRpcUrl()) {
+      const u = solRpcUrl();
+      setUrl(u);
+      setArmed(u);
+      setMsg("rpc stays on in this browser.");
+      return;
+    }
     const err = setSolRpcUrl(url);
     if (err) {
       setMsg(err);
@@ -355,7 +364,8 @@ function RpcDock() {
     }
     const u = solRpcUrl();
     setArmed(u);
-    setMsg(u ? "sends only. confirms stay public so Helius credits last." : "RPC off. public endpoints only.");
+    setUrl(u);
+    setMsg(u ? "rpc stays on in this browser. Helius is used for sends and balance." : "RPC off. public endpoints only.");
   }
 
   return (
@@ -363,7 +373,7 @@ function RpcDock() {
       <input
         value={url}
         onChange={(e) => setUrl(e.target.value)}
-        placeholder="Helius RPC URL"
+        placeholder="Helius URL or API key"
         spellCheck={false}
         autoCapitalize="off"
         autoCorrect="off"
@@ -766,19 +776,18 @@ function CloudDock({
 function WakeScreen({
   ready = true,
   hunting = false,
-  eyes = 0,
-  role = "off",
 }: {
   ready?: boolean;
   hunting?: boolean;
-  eyes?: number;
-  role?: "hunter" | "watch" | "off";
 }) {
   const arm = useTrench((s) => s.arm);
-  const spectate = useTrench((s) => s.spectate);
   const leaveHome = useTrench((s) => s.leaveHome);
   const setHydrated = useTrench((s) => s.setHydrated);
   const [stuck, setStuck] = useState(false);
+  const [askPin, setAskPin] = useState(false);
+  const [pin, setPin] = useState("");
+  const [pinMsg, setPinMsg] = useState<string | null>(null);
+  const [pinBusy, setPinBusy] = useState(false);
 
   useEffect(() => {
     if (ready) return;
@@ -788,6 +797,22 @@ function WakeScreen({
     }, 1200);
     return () => window.clearTimeout(id);
   }, [ready, setHydrated]);
+
+  async function watchChamber() {
+    setPinBusy(true);
+    try {
+      const text = await unlockCloud(pin);
+      setPinMsg(text);
+      if (/needs 4|no chamber|did not|not found|dark/i.test(text)) {
+        setPinBusy(false);
+        return;
+      }
+      window.setTimeout(() => window.location.reload(), 400);
+    } catch {
+      setPinMsg("chamber did not answer.");
+      setPinBusy(false);
+    }
+  }
 
   return (
     <main className="relative flex min-h-dvh flex-col justify-between bg-bg px-5 py-8 sm:px-10 sm:py-12">
@@ -822,7 +847,7 @@ function WakeScreen({
               onClick={() => arm()}
               className="min-h-12 w-full sm:w-auto"
             >
-              {ready ? `Stake ${formatUsd(STARTING_CASH, 0)}` : "Loading the book…"}
+              {ready ? "Start" : "Loading the book…"}
             </Button>
           )}
           {!hunting ? (
@@ -830,19 +855,47 @@ function WakeScreen({
               size="lg"
               variant="ghost"
               disabled={!ready}
-              onClick={() => spectate()}
+              onClick={() => {
+                setAskPin(true);
+                setPin(deskPin());
+              }}
               className="min-h-12 w-full sm:w-auto"
             >
               Spectate
             </Button>
           ) : null}
-          <BookDock />
-          <GmgnDock />
-          <RpcDock />
-          <CloudDock eyes={eyes} role={role} />
+          {askPin && !hunting ? (
+            <form
+              className="flex flex-wrap items-center gap-2"
+              onSubmit={(e) => {
+                e.preventDefault();
+                void watchChamber();
+              }}
+            >
+              <input
+                value={pin}
+                onChange={(e) => setPin(e.target.value)}
+                placeholder="chamber #"
+                spellCheck={false}
+                autoCapitalize="off"
+                autoCorrect="off"
+                autoFocus
+                className="h-12 w-40 border border-line bg-elevated px-3 font-mono text-sm text-fg placeholder:text-subtle"
+              />
+              <Button
+                size="lg"
+                variant="ghost"
+                type="submit"
+                disabled={!ready || pinBusy}
+                className="min-h-12"
+              >
+                {pinBusy ? "Looking…" : "Watch"}
+              </Button>
+              {pinMsg ? <p className="font-mono text-2xs text-subtle">{pinMsg}</p> : null}
+            </form>
+          ) : null}
           <p className="font-mono text-2xs leading-relaxed text-subtle">
-            Second window is a blank cell. Do not stake. Load the book JSON from Downloads.
-            The hunt, Hatch, and hot wallet live in the tab that was already running.
+            Second window watches. The hunt and hot wallet live in the tab that was already running.
           </p>
           {stuck ? (
             <Button size="sm" variant="ghost" onClick={() => hardReload(true)}>
@@ -1301,29 +1354,23 @@ function Desk({
         </div>
         <div className="flex flex-wrap items-center gap-2 border-t border-line px-4 py-2 sm:px-6">
           <p className="mr-auto font-mono text-2xs tracking-wide text-muted">
-            thesis · {meta.thesis}
-            {meta.source === "grok" ? " · grok" : meta.source === "local" ? " · local" : ""}
-            {" · "}floor {liveFloor(playbook, weather ?? blankWeather(), spiritFloor ?? 45)}
-            {weather?.at ? ` · META ${formatWeather(weather, tapeVenue)}` : ""}
-            {" · "}stop {(playbook.stopPct * 100).toFixed(0)}%
-            {" · "}
             {(() => {
+              const words = (meta.thesis || "").split(/\s+/).filter(Boolean).slice(0, 4).join(" ");
+              const floor = liveFloor(playbook, weather ?? blankWeather(), spiritFloor ?? 45);
               const spec = trailSpec(tapeVenue, weather);
               const green = protectSpec(weather);
-              const trail =
-                tapeVenue === "pons"
-                  ? `hard +${((spec.hard ?? HARD_TAKE_PONS) * 100).toFixed(0)}% · trail +${(spec.arm * 100).toFixed(0)}%/−${(spec.give * 100).toFixed(0)}% peak`
-                  : `trail +${(spec.arm * 100).toFixed(0)}%/−${(spec.give * 100).toFixed(0)}% peak`;
-              return `${trail} · protect +${(green.arm * 100).toFixed(0)}%→+${(green.keep * 100).toFixed(0)}%`;
+              const bits = [
+                words || "no thesis",
+                `floor ${floor}`,
+                `stop ${(playbook.stopPct * 100).toFixed(0)}%`,
+                `trail +${(spec.arm * 100).toFixed(0)}/−${(spec.give * 100).toFixed(0)}`,
+                `bank +${(green.arm * 100).toFixed(0)}`,
+              ];
+              if (playbook.bannedCreators.length) bits.push(`${playbook.bannedCreators.length} burned`);
+              bits.push(cubFocus ? cubSign : hatchFocus ? hatchSign : vetSign);
+              if (soloDesk) bits.push("solo");
+              return bits.join(" · ");
             })()}
-            {playbook.bannedCreators.length ? ` · ${playbook.bannedCreators.length} burned` : ""}
-            {lastGmgn
-              ? ` · gmgn $${lastGmgn.symbol}`
-              : gmgnKey()
-                ? " · gmgn on"
-                : ""}
-            {` · ${cubFocus ? cubSign : hatchFocus ? hatchSign : vetSign}`}
-            {soloDesk ? " · solo" : ""}
           </p>
           <BookDock compact />
           <NtfyDock />

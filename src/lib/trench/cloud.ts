@@ -70,7 +70,8 @@ function pack(): string {
   const spirit = localStorage.getItem("trencher-spirit-v1") ?? "";
   const eth = localStorage.getItem("trencher-eth-hot-v1") ?? "";
   const live = localStorage.getItem("trencher-live-mints") ?? "";
-  return JSON.stringify({ trench, hot, auto, ntfy, spirit, eth, live, at: Date.now() });
+  const rpc = localStorage.getItem("trencher-sol-rpc") ?? "";
+  return JSON.stringify({ trench, hot, auto, ntfy, spirit, eth, live, rpc, at: Date.now() });
 }
 
 function unpack(raw: string) {
@@ -82,6 +83,7 @@ function unpack(raw: string) {
     spirit?: string;
     eth?: string;
     live?: string;
+    rpc?: string;
   };
   try {
     data = JSON.parse(raw) as typeof data;
@@ -96,6 +98,7 @@ function unpack(raw: string) {
   if (data.spirit) localStorage.setItem("trencher-spirit-v1", data.spirit);
   if (data.eth) localStorage.setItem("trencher-eth-hot-v1", data.eth);
   if (data.live) localStorage.setItem("trencher-live-mints", data.live);
+  if (data.rpc) localStorage.setItem("trencher-sol-rpc", data.rpc);
 }
 
 function ids() {

@@ -1,15 +1,22 @@
 const KEY = "trencher-sol-rpc";
+const HELIUS = "https://mainnet.helius-rpc.com/?api-key=";
 
 export function sanitizeSolRpc(raw: string): { url: string; error: string | null } {
   const s = String(raw ?? "").replace(/\s+/g, "").trim();
   if (!s) return { url: "", error: null };
-  if (!/^https:\/\/[a-z0-9.-]+/i.test(s) || s.length > 280) {
-    return { url: "", error: "paste an https Solana RPC URL (Helius, QuickNode, Alchemy)." };
+  if (/^https:\/\//i.test(s)) {
+    if (!/^https:\/\/[a-z0-9.-]+/i.test(s) || s.length > 280) {
+      return { url: "", error: "paste an https Solana RPC URL or a Helius API key." };
+    }
+    if (/wallet|private|secret|BEGIN/i.test(s)) {
+      return { url: "", error: "that's a wallet secret. paste the RPC URL or Helius API key." };
+    }
+    return { url: s, error: null };
   }
-  if (/wallet|private|secret|BEGIN/i.test(s)) {
-    return { url: "", error: "that's a key. paste the RPC URL only." };
+  if (/^[A-Za-z0-9_-]{16,120}$/.test(s)) {
+    return { url: `${HELIUS}${s}`, error: null };
   }
-  return { url: s, error: null };
+  return { url: "", error: "paste a Helius API key or an https RPC URL." };
 }
 
 export function solRpcUrl(): string {
